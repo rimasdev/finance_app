@@ -1,0 +1,54 @@
+{
+  "project_info": {
+    "project_number": "518774468117",
+    "project_id": "takings-88404",
+    "storage_bucket": "takings-88404.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:518774468117:android:3ffebe04c7c5235a2de81c",
+        "android_client_info": {
+          "package_name": "lk.alphabet.takings"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "518774468117-3ssda9pfgds9sv48hck5p6hm0j2mkjum.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "lk.alphabet.takings",
+            "certificate_hash": "5773d64170cf57562dbaa60263480b8e6e3bd69c"
+          }
+        },
+        {
+          "client_id": "518774468117-mjr428jf41j77b4pgilg8lucm2l123qk.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDwR5-ZEF4N0Ul6GHxEAUbVSTgBhlTdpK0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "518774468117-mjr428jf41j77b4pgilg8lucm2l123qk.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "518774468117-6bjos1h56mq7qps7kf2fqvhrujsl0a79.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "lk.alphabet.takings"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

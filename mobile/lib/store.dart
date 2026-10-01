@@ -1,0 +1,316 @@
+import 'package:flutter/foundation.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
+
+import 'api.dart';
+import 'api_config.dart';
+import 'capture.dart';
+import 'format.dart';
+import 'models.dart';
+
+class FolioStore extends ChangeNotifier {
+  FolioStore();
+
+  final ApiClient api = ApiClient(baseUrl: defaultApiBase());
+  String? token;
+  UserProfile? me;
+  bool booting = true;
+  bool refreshing = false;
+  String? lastError;
+  DateTime? syncedAt;
+  DateTime month = DateTime(DateTime.now().year, DateTime.now().month);
+  String? accountFilter;
+  String scope = 'all';
+  String search = '';
+
+  DashboardData? dashboard;
+  InsightsData? insights;
+  TimelineData? timeline;
+  List<AccountModel> accounts = [];
+  List<CategoryModel> categories = [];
+  List<BudgetModel> budgets = [];
+  List<TxnModel> review = [];
+
+  bool get signedIn => token != null && me != null;
+
+  double get personalNet => accounts
+      .where((account) => account.purpose == 'personal')
+      .fold(0, (sum, account) => sum + account.balance);
+
+  double get businessNet => accounts
+      .where((account) => account.purpose == 'business')
+      .fold(0, (sum, account) => sum + account.balance);
+
+  Future<void> bootstrap() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString('baseUrl');
+    if (saved != null && saved.isNotEmpty) api.baseUrl = saved;
+    token = prefs.getString('token');
+    api.token = token;
+    if (token != null) {
+      try {
+        me = UserProfile.fromJson((await api.get('/me')) as Map<String, dynamic>);
+        await refresh();
+        await Capture.setSession(token: token!, baseUrl: api.baseUrl);
+      } on ApiException catch (error) {
+        if (error.status == 401) {
+          await _clearLocal();
+        } else {
+          lastError = error.message;
+        }
+      } catch (_) {
+        lastError = 'Cannot reach the server';
+      }
+    }
+    booting = false;
+    notifyListeners();
+  }
+
+  Future<void> setBaseUrl(String value) async {
+    api.baseUrl = value.trim().replaceAll(RegExp(r'/+$'), '');
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('baseUrl', api.baseUrl);
+  }
+
+  Future<void> register(String name, String email, String password) async {
+    final result = await api.post('/auth/register', {
+      'name': name,
+      'email': email,
+      'password': password,
+    });
+    await _persist(result as Map<String, dynamic>);
+  }
+
+  Future<void> login(String email, String password) async {
+    final result = await api.post('/auth/login', {'email': email, 'password': password});
+    await _persist(result as Map<String, dynamic>);
+  }
+
+  static final GoogleSignIn _google = GoogleSignIn(
+    scopes: const ['email', 'profile'],
+    serverClientId: ApiConfig.googleServerClientId,
+  );
+
+  Future<void> signInWithGoogle() async {
+    try {
+      await _google.signOut();
+    } catch (_) {}
+    final account = await _google.signIn();
+    if (account == null) {
+      throw StateError('Google sign-in cancelled');
+    }
+    final auth = await account.authentication;
+    final idToken = auth.idToken;
+    if (idToken == null) {
+      throw StateError(
+        'Google did not return an id token. Add an Android OAuth client for lk.alphabet.takings in the Alphabet Google project, then restart the app.',
+      );
+    }
+    final result = await api.post('/auth/google', {'idToken': idToken});
+    await _persist(result as Map<String, dynamic>);
+  }
+
+  Future<void> signInWithApple() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
+      throw StateError('Sign in with Apple is on iPhone. Use Google or email here.');
+    }
+    final credential = await SignInWithApple.getAppleIDCredential(
+      scopes: const [
+        AppleIDAuthorizationScopes.email,
+        AppleIDAuthorizationScopes.fullName,
+      ],
+    );
+    final idToken = credential.identityToken;
+    if (idToken == null) {
+      throw StateError('Apple did not return an identity token');
+    }
+    final result = await api.post('/auth/apple', {
+      'idToken': idToken,
+      'fullName': {
+        'givenName': credential.givenName,
+        'familyName': credential.familyName,
+      },
+    });
+    await _persist(result as Map<String, dynamic>);
+  }
+
+  Future<void> _persist(Map<String, dynamic> result) async {
+    token = result['token'] as String;
+    api.token = token;
+    me = UserProfile.fromJson(result['user'] as Map<String, dynamic>);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('token', token!);
+    await prefs.setString('baseUrl', api.baseUrl);
+    await Capture.setSession(token: token!, baseUrl: api.baseUrl);
+    await refresh();
+  }
+
+  Future<void> logout() async {
+    try {
+      await _google.signOut();
+    } catch (_) {}
+    await _clearLocal();
+    notifyListeners();
+  }
+
+  Future<void> _clearLocal() async {
+    token = null;
+    api.token = null;
+    me = null;
+    dashboard = null;
+    insights = null;
+    timeline = null;
+    accounts = [];
+    categories = [];
+    budgets = [];
+    review = [];
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('token');
+    await Capture.clearSession();
+  }
+
+  Future<void> refresh() async {
+    refreshing = true;
+    lastError = null;
+    notifyListeners();
+    final key = monthKey(month);
+    final params = <String, String>{'month': key};
+    if (accountFilter != null) params['account_id'] = accountFilter!;
+    if (scope != 'all') params['scope'] = scope;
+    if (search.trim().isNotEmpty) params['q'] = search.trim();
+    final query = params.entries.map((entry) => '${entry.key}=${Uri.encodeQueryComponent(entry.value)}').join('&');
+    try {
+      final results = await Future.wait([
+        api.get('/dashboard'),
+        api.get('/insights?month=$key'),
+        api.get('/timeline?$query'),
+        api.get('/accounts'),
+        api.get('/categories'),
+        api.get('/budgets?month=$key'),
+        api.get('/transactions?status=needs_review'),
+      ]);
+      dashboard = DashboardData.fromJson(results[0] as Map<String, dynamic>);
+      insights = InsightsData.fromJson(results[1] as Map<String, dynamic>);
+      timeline = TimelineData.fromJson(results[2] as Map<String, dynamic>);
+      accounts = [
+        for (final row in results[3] as List) AccountModel.fromJson(row as Map<String, dynamic>),
+      ];
+      categories = [
+        for (final row in results[4] as List) CategoryModel.fromJson(row as Map<String, dynamic>),
+      ];
+      budgets = [
+        for (final row in results[5] as List) BudgetModel.fromJson(row as Map<String, dynamic>),
+      ];
+      review = [
+        for (final row in results[6] as List) TxnModel.fromJson(row as Map<String, dynamic>),
+      ];
+      syncedAt = DateTime.now();
+    } on ApiException catch (error) {
+      lastError = error.message;
+      rethrow;
+    } catch (_) {
+      lastError = 'Cannot reach the server';
+      rethrow;
+    } finally {
+      refreshing = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> shiftMonth(int delta) async {
+    month = DateTime(month.year, month.month + delta);
+    await refresh();
+  }
+
+  Future<void> setAccountFilter(String? id) async {
+    accountFilter = id;
+    await refresh();
+  }
+
+  Future<void> setScope(String value) async {
+    scope = value;
+    await refresh();
+  }
+
+  Future<void> setSearch(String value) async {
+    search = value;
+    await refresh();
+  }
+
+  Future<void> createAccount(Map<String, dynamic> body) async {
+    await api.post('/accounts', body);
+    await refresh();
+  }
+
+  Future<void> updateAccount(String id, Map<String, dynamic> body) async {
+    await api.patch('/accounts/$id', body);
+    await refresh();
+  }
+
+  Future<void> deleteAccount(String id) async {
+    await api.delete('/accounts/$id');
+    await refresh();
+  }
+
+  Future<void> createCategory(String name, String kind) async {
+    await api.post('/categories', {'name': name, 'kind': kind, 'icon': 'other'});
+    await refresh();
+  }
+
+  Future<void> deleteCategory(String id) async {
+    await api.delete('/categories/$id');
+    await refresh();
+  }
+
+  Future<void> createTransaction(Map<String, dynamic> body) async {
+    await api.post('/transactions', body);
+    await refresh();
+  }
+
+  Future<void> deleteTransaction(String id) async {
+    await api.delete('/transactions/$id');
+    await refresh();
+  }
+
+  Future<void> assignTransaction(String id, String accountId, String? categoryId) async {
+    await api.post('/transactions/$id/assign', {
+      'account_id': accountId,
+      'category_id': ?categoryId,
+    });
+    await refresh();
+  }
+
+  Future<Map<String, dynamic>> ingestSms(String body, {String sender = ''}) async {
+    final result = await api.post('/sms/ingest', {
+      'body': body,
+      'sender': sender,
+      'manual': true,
+    });
+    await refresh();
+    return result as Map<String, dynamic>;
+  }
+
+  Future<void> createBudget(Map<String, dynamic> body) async {
+    await api.post('/budgets', body);
+    await refresh();
+  }
+
+  Future<void> deleteBudget(String id) async {
+    await api.delete('/budgets/$id');
+    await refresh();
+  }
+
+  Future<void> updateProfile({String? name, int? monthStartDay}) async {
+    me = UserProfile.fromJson((await api.patch('/me', {
+      'name': ?name,
+      'month_start_day': ?monthStartDay,
+    })) as Map<String, dynamic>);
+    await refresh();
+  }
+
+  Future<void> deleteEverything() async {
+    await api.delete('/me');
+    await logout();
+  }
+}

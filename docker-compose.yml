@@ -1,0 +1,24 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: folio
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-folio}
+      POSTGRES_DB: folio
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  api:
+    build: .
+    ports:
+      - "3120:3120"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://folio:${POSTGRES_PASSWORD:-folio}@db:5432/folio}
+      JWT_SECRET: ${JWT_SECRET:-change-me}
+    depends_on:
+      - db
+    restart: unless-stopped
+
+volumes:
+  pgdata:
