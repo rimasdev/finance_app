@@ -351,11 +351,20 @@ class TimelineData {
   );
 }
 
+String recurringFxNote({String provider = '', String currency = 'LKR'}) {
+  final payment = provider.trim().replaceAll('|', '/');
+  final code = currency.trim().toUpperCase();
+  if (payment.isEmpty && (code.isEmpty || code == 'LKR')) return '';
+  return 'fx:$payment|${code.isEmpty ? 'LKR' : code}';
+}
+
 class RecurringModel {
   RecurringModel({
     required this.id,
     required this.kind,
     required this.name,
+    required this.provider,
+    required this.currency,
     required this.amount,
     required this.accountId,
     required this.accountName,
@@ -370,6 +379,8 @@ class RecurringModel {
   final String id;
   final String kind;
   final String name;
+  final String provider;
+  final String currency;
   final double amount;
   final String? accountId;
   final String accountName;
@@ -380,20 +391,38 @@ class RecurringModel {
   final bool active;
   final String note;
 
-  factory RecurringModel.fromJson(Map<String, dynamic> json) => RecurringModel(
-    id: json['id'] as String,
-    kind: json['kind'] as String? ?? 'repeat',
-    name: json['name'] as String? ?? '',
-    amount: (json['amount'] as num?)?.toDouble() ?? 0,
-    accountId: json['account_id'] as String?,
-    accountName: json['account_name'] as String? ?? '',
-    interval: json['interval'] as String? ?? 'monthly',
-    nextOn: json['next_on'] as String? ?? '',
-    installmentsTotal: json['installments_total'] as int?,
-    installmentsDone: json['installments_done'] as int? ?? 0,
-    active: json['active'] as bool? ?? true,
-    note: json['note'] as String? ?? '',
-  );
+  factory RecurringModel.fromJson(Map<String, dynamic> json) {
+    final rawNote = json['note'] as String? ?? '';
+    var provider = (json['provider'] as String? ?? '').trim();
+    var currency = (json['currency'] as String? ?? '').trim().toUpperCase();
+    var note = rawNote;
+    if (rawNote.startsWith('fx:')) {
+      final parts = rawNote.substring(3).split('|');
+      if (provider.isEmpty && parts.isNotEmpty) provider = parts.first.trim();
+      if ((currency.isEmpty || currency == 'LKR') && parts.length > 1) {
+        final coded = parts[1].trim().toUpperCase();
+        if (coded.isNotEmpty) currency = coded;
+      }
+      note = '';
+    }
+    if (currency.isEmpty) currency = 'LKR';
+    return RecurringModel(
+      id: json['id'] as String,
+      kind: json['kind'] as String? ?? 'repeat',
+      name: json['name'] as String? ?? '',
+      provider: provider,
+      currency: currency,
+      amount: (json['amount'] as num?)?.toDouble() ?? 0,
+      accountId: json['account_id'] as String?,
+      accountName: json['account_name'] as String? ?? '',
+      interval: json['interval'] as String? ?? 'monthly',
+      nextOn: json['next_on'] as String? ?? '',
+      installmentsTotal: json['installments_total'] as int?,
+      installmentsDone: json['installments_done'] as int? ?? 0,
+      active: json['active'] as bool? ?? true,
+      note: note,
+    );
+  }
 }
 
 class BudgetModel {

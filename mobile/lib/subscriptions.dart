@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'theme.dart';
+
 const subscriptionCatalog = <String, List<String>>{
   'Streaming': [
     'Netflix',
@@ -130,7 +132,14 @@ const _subscriptionLogos = <String, String>{
   'xboxgamepass': 'images/subscriptions/xbox-game-pass.png',
   'nintendo': 'images/subscriptions/nintendo-switch-online.png',
   'nintendoswitchonline': 'images/subscriptions/nintendo-switch-online.png',
+  'mintpay': 'images/subscriptions/mintpay.png',
+  'mint': 'images/subscriptions/mintpay.png',
+  'koko': 'images/subscriptions/koko.png',
+  'payzy': 'images/subscriptions/payzy.png',
+  'snap': 'images/subscriptions/snap.png',
 };
+
+const installmentPayments = ['Mint Pay', 'Koko', 'Payzy', 'Snap'];
 
 String _compact(String value) => value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
 
@@ -204,5 +213,67 @@ class SubscriptionMark extends StatelessWidget {
     return ClipOval(
       child: Image.asset(logo, width: size, height: size, fit: BoxFit.cover),
     );
+  }
+}
+
+Future<String?> pickInstallmentPayment(BuildContext context) async {
+  final picked = await showModalBottomSheet<String>(
+    context: context,
+    backgroundColor: FolioColors.bg,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+    ),
+    builder: (context) => SafeArea(
+      child: ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+        children: [
+          const Text('Payment', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 12),
+          for (final name in installmentPayments)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: SubscriptionMark(name: name, size: 36),
+              title: Text(name),
+              onTap: () => Navigator.pop(context, name),
+            ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Other'),
+            subtitle: const Text('Type a payment that is not in the list'),
+            onTap: () => Navigator.pop(context, 'Other'),
+          ),
+        ],
+      ),
+    ),
+  );
+  if (picked == null || !context.mounted) return null;
+  if (picked != 'Other') return picked;
+  final controller = TextEditingController();
+  try {
+    final typed = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: FolioColors.card,
+        title: const Text('Payment'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          textCapitalization: TextCapitalization.words,
+          decoration: const InputDecoration(hintText: 'Payment name'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    final name = typed?.trim() ?? '';
+    return name.isEmpty ? null : name;
+  } finally {
+    controller.dispose();
   }
 }

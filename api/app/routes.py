@@ -1,8 +1,11 @@
 import csv
 import io
+import json
 import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from urllib.error import URLError
+from urllib.request import urlopen
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -768,6 +771,7 @@ def create_transaction(body: TxnIn, user: User = Depends(current_user), db: Sess
         hidden=body.hidden,
     )
     db.add(txn)
+    _settle_matching_recurring(db, user, txn)
     db.commit()
     db.refresh(txn)
     return txn_json(txn, account_map(db, user.id), category_map(db, user.id))
@@ -845,6 +849,7 @@ def assign_transaction(
     txn.status = "posted"
     if category:
         txn.category_id = category.id
+    siblings: list[Transaction] = []
     if txn.card_last4:
         remember_card(account, txn.card_last4)
         siblings = (
@@ -860,6 +865,9 @@ def assign_transaction(
                 sibling.category_id = category.id
             apply_withdrawal_transfer(db, user, sibling)
     apply_withdrawal_transfer(db, user, txn)
+    _settle_matching_recurring(db, user, txn)
+    for sibling in siblings:
+        _settle_matching_recurring(db, user, sibling)
     db.commit()
     db.refresh(txn)
     return txn_json(txn, account_map(db, user.id), category_map(db, user.id))
@@ -880,7 +888,13 @@ def delete_transaction(txn_id: str, user: User = Depends(current_user), db: Sess
 @router.post("/sms/ingest")
 def sms_ingest(body: SmsIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
     received = body.received_at.replace(tzinfo=None) if body.received_at else None
-    return ingest_sms(db, user, body.body, body.sender, received, manual=body.manual)
+    result = ingest_sms(db, user, body.body, body.sender, received, manual=body.manual)
+    txn_id = (result.get("transaction") or {}).get("id")
+    if result.get("status") == "posted" and txn_id:
+        txn = db.get(Transaction, txn_id)
+        if txn is not None and _settle_matching_recurring(db, user, txn):
+            db.commit()
+    return result
 
 
 @router.post("/sms/preview")
@@ -1049,6 +1063,67 @@ def delete_loan(loan_id: str, user: User = Depends(current_user), db: Session = 
     return {"deleted": True}
 
 
+def _compact_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (value or "").lower())
+
+
+def _expected_lkr(row: Recurring) -> Decimal | None:
+    amount = Decimal(str(row.amount))
+    currency = (row.currency or "LKR").upper()
+    if currency == "LKR":
+        return amount
+    try:
+        return (amount * _lkr_rate(currency)).quantize(Decimal("0.01"))
+    except HTTPException:
+        return None
+
+
+def _mark_paid(row: Recurring) -> None:
+    row.installments_done = (row.installments_done or 0) + 1
+    if row.kind == "installment" and row.installments_total and row.installments_done >= row.installments_total:
+        row.active = False
+        return
+    row.next_on = _advance(row.next_on, row.interval)
+
+
+def _settle_matching_recurring(db: Session, user: User, txn: Transaction) -> bool:
+    """A bank message or a manual expense pays the matching plan without a second debit."""
+    if txn.status != "posted" or txn.direction != "expense" or txn.source == "recurring":
+        return False
+    if not txn.account_id or txn.occurred_at is None:
+        return False
+    when = txn.occurred_at.date() if isinstance(txn.occurred_at, datetime) else txn.occurred_at
+    hay = _compact_name(f"{txn.merchant or ''} {txn.raw_sms or ''}")
+    paid = Decimal(str(txn.amount))
+    best: Recurring | None = None
+    best_gap: Decimal | None = None
+    rows = db.query(Recurring).filter_by(user_id=user.id, active=True).all()
+    for row in rows:
+        if row.account_id and row.account_id != txn.account_id:
+            continue
+        if row.next_on is None:
+            continue
+        if when < row.next_on - timedelta(days=5) or when > row.next_on + timedelta(days=20):
+            continue
+        keys = [_compact_name(row.name), _compact_name(row.provider)]
+        if not any(len(key) >= 3 and key in hay for key in keys):
+            continue
+        expected = _expected_lkr(row)
+        if expected is None or expected <= 0:
+            continue
+        gap = abs(paid - expected)
+        tolerance = max(Decimal("25"), (expected * Decimal("0.03")).quantize(Decimal("0.01")))
+        if gap > tolerance:
+            continue
+        if best is None or best_gap is None or gap < best_gap:
+            best = row
+            best_gap = gap
+    if best is None:
+        return False
+    _mark_paid(best)
+    return True
+
+
 def _advance(day: date, interval: str) -> date:
     if interval == "weekly":
         return day + timedelta(days=7)
@@ -1064,12 +1139,54 @@ def _advance(day: date, interval: str) -> date:
     return date(year, month, min(day.day, last.day))
 
 
+_fx_day: str | None = None
+_fx_rates: dict[str, Decimal] = {}
+
+
+def _lkr_rate(currency: str) -> Decimal:
+    """Rupees for one unit of currency, using the latest published daily rate."""
+    code = (currency or "LKR").strip().upper()
+    if code == "LKR":
+        return Decimal("1")
+    global _fx_day
+    today = date.today().isoformat()
+    if _fx_day != today:
+        _fx_rates.clear()
+        _fx_day = today
+    cached = _fx_rates.get(code)
+    if cached is not None:
+        return cached
+    try:
+        with urlopen(
+            "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.min.json",
+            timeout=12,
+        ) as response:
+            payload = json.load(response)
+        usd = payload["usd"]
+        lkr = Decimal(str(usd["lkr"]))
+        per_usd = {
+            "USD": Decimal("1"),
+            "EUR": Decimal(str(usd["eur"])),
+            "GBP": Decimal(str(usd["gbp"])),
+        }
+    except (URLError, TimeoutError, OSError, KeyError, ValueError, json.JSONDecodeError) as error:
+        raise HTTPException(400, "The rupee rate is unavailable right now") from error
+    quote = per_usd.get(code)
+    if quote is None or quote == 0:
+        raise HTTPException(400, "That currency cannot be converted to rupees")
+    for key, value in per_usd.items():
+        _fx_rates[key] = (lkr / value).quantize(Decimal("0.0001"))
+    return _fx_rates[code]
+
+
 def _recurring_json(row: Recurring, accounts: dict[str, Account]) -> dict:
     account = accounts.get(row.account_id or "")
     return {
         "id": row.id,
         "kind": row.kind,
         "name": row.name,
+        "provider": row.provider or "",
+        "currency": (row.currency or "LKR").upper(),
         "amount": float(row.amount),
         "account_id": row.account_id,
         "account_name": account.name if account else "",
@@ -1085,6 +1202,8 @@ def _recurring_json(row: Recurring, accounts: dict[str, Account]) -> dict:
 class RecurringIn(BaseModel):
     kind: str
     name: str
+    provider: str = ""
+    currency: str = "LKR"
     amount: Decimal = Field(gt=0)
     account_id: str
     interval: str = "monthly"
@@ -1114,6 +1233,19 @@ class RecurringIn(BaseModel):
             raise ValueError("Add a name")
         return value
 
+    @field_validator("provider")
+    @classmethod
+    def clean_provider(cls, value: str) -> str:
+        return value.strip()[:80]
+
+    @field_validator("currency")
+    @classmethod
+    def clean_currency(cls, value: str) -> str:
+        value = value.strip().upper() or "LKR"
+        if value not in {"LKR", "USD", "EUR", "GBP"}:
+            raise ValueError("Unknown currency")
+        return value
+
 
 @router.get("/recurring")
 def list_recurring(user: User = Depends(current_user), db: Session = Depends(get_db)):
@@ -1131,6 +1263,8 @@ def create_recurring(body: RecurringIn, user: User = Depends(current_user), db: 
         user_id=user.id,
         kind=body.kind,
         name=body.name,
+        provider=body.provider,
+        currency=body.currency,
         amount=body.amount,
         account_id=account.id,
         interval=body.interval,
@@ -1154,24 +1288,113 @@ def pay_recurring(recurring_id: str, user: User = Depends(current_user), db: Ses
     if not row.account_id:
         raise HTTPException(400, "Choose an account")
     account = _owned_account(db, user, row.account_id)
+    currency = (row.currency or "LKR").upper()
+    amount = Decimal(str(row.amount))
+    if currency != "LKR":
+        amount = (amount * _lkr_rate(currency)).quantize(Decimal("0.01"))
+    note = "" if (row.note or "").startswith("fx:") else (row.note or "")
+    if currency != "LKR":
+        shown = format(Decimal(str(row.amount)).quantize(Decimal("0.01")), "f")
+        original = f"{currency} {shown}"
+        note = original if not note else f"{note} · {original}"
     txn = Transaction(
         user_id=user.id,
         account_id=account.id,
         direction="expense",
-        amount=row.amount,
+        amount=amount,
         merchant=row.name,
-        note=row.note or "",
+        note=note,
         occurred_at=datetime.combine(row.next_on, datetime.min.time()),
         scope=account.purpose,
         source="recurring",
         status="posted",
     )
     db.add(txn)
-    row.installments_done = (row.installments_done or 0) + 1
-    if row.kind == "installment" and row.installments_total and row.installments_done >= row.installments_total:
+    _mark_paid(row)
+    db.commit()
+    db.refresh(row)
+    return _recurring_json(row, account_map(db, user.id))
+
+
+class RecurringPatch(BaseModel):
+    name: str | None = None
+    provider: str | None = None
+    currency: str | None = None
+    amount: Decimal | None = Field(default=None, gt=0)
+    account_id: str | None = None
+    interval: str | None = None
+    next_on: date | None = None
+    installments_total: int | None = Field(default=None, ge=1, le=360)
+    note: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def clean_patch_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("Add a name")
+        return value
+
+    @field_validator("provider")
+    @classmethod
+    def clean_patch_provider(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip()[:80]
+
+    @field_validator("currency")
+    @classmethod
+    def clean_patch_currency(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip().upper() or "LKR"
+        if value not in {"LKR", "USD", "EUR", "GBP"}:
+            raise ValueError("Unknown currency")
+        return value
+
+    @field_validator("interval")
+    @classmethod
+    def clean_patch_interval(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value not in {"weekly", "monthly", "yearly"}:
+            raise ValueError("Unknown interval")
+        return value
+
+
+@router.patch("/recurring/{recurring_id}")
+def patch_recurring(
+    recurring_id: str,
+    body: RecurringPatch,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    row = db.get(Recurring, recurring_id)
+    if row is None or row.user_id != user.id:
+        raise HTTPException(404, "Recurring item not found")
+    data = body.model_dump(exclude_unset=True)
+    if "account_id" in data and data["account_id"]:
+        row.account_id = _owned_account(db, user, data["account_id"]).id
+    if "name" in data and data["name"]:
+        row.name = data["name"]
+    if "provider" in data and data["provider"] is not None:
+        row.provider = data["provider"]
+    if "currency" in data and data["currency"]:
+        row.currency = data["currency"]
+    if "amount" in data and data["amount"] is not None:
+        row.amount = data["amount"]
+    if "interval" in data and data["interval"]:
+        row.interval = data["interval"]
+    if "next_on" in data and data["next_on"] is not None:
+        row.next_on = data["next_on"]
+    if "note" in data and data["note"] is not None:
+        row.note = data["note"].strip()
+    if row.kind == "installment" and "installments_total" in data and data["installments_total"]:
+        row.installments_total = data["installments_total"]
+    if row.kind == "installment" and row.installments_total and (row.installments_done or 0) >= row.installments_total:
         row.active = False
-    else:
-        row.next_on = _advance(row.next_on, row.interval)
     db.commit()
     db.refresh(row)
     return _recurring_json(row, account_map(db, user.id))

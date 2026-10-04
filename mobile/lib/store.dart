@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -8,6 +10,7 @@ import 'api.dart';
 import 'api_config.dart';
 import 'capture.dart';
 import 'format.dart';
+import 'fx.dart';
 import 'models.dart';
 
 class FolioStore extends ChangeNotifier {
@@ -33,6 +36,7 @@ class FolioStore extends ChangeNotifier {
   List<BudgetModel> budgets = [];
   List<LoanModel> loans = [];
   List<RecurringModel> recurring = [];
+  ExchangeRates? rates;
   bool showRecurringHome = false;
   List<TxnModel> review = [];
 
@@ -185,8 +189,32 @@ class FolioStore extends ChangeNotifier {
     await Capture.clearSession();
   }
 
+  Future<void> loadRates() async {
+    final prefs = await SharedPreferences.getInstance();
+    final today = colomboDay();
+    ExchangeRates? cached;
+    final raw = prefs.getString('fxRates');
+    if (raw != null) {
+      try {
+        cached = ExchangeRates.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+      } catch (_) {}
+    }
+    if (cached != null && prefs.getString('fxFetched') == today) {
+      rates = cached;
+      return;
+    }
+    try {
+      rates = await fetchExchangeRates();
+      await prefs.setString('fxRates', jsonEncode(rates!.toJson()));
+      await prefs.setString('fxFetched', today);
+    } catch (_) {
+      rates ??= cached;
+    }
+  }
+
   Future<void> refresh() async {
     refreshing = true;
+    final ratesFuture = loadRates();
     lastError = null;
     notifyListeners();
     final key = monthKey(month);
@@ -254,6 +282,7 @@ class FolioStore extends ChangeNotifier {
       lastError = 'Cannot reach the server';
       rethrow;
     } finally {
+      await ratesFuture;
       refreshing = false;
       notifyListeners();
     }
@@ -415,6 +444,11 @@ class FolioStore extends ChangeNotifier {
 
   Future<void> createRecurring(Map<String, dynamic> body) async {
     await api.post('/recurring', body);
+    await refresh();
+  }
+
+  Future<void> updateRecurring(String id, Map<String, dynamic> body) async {
+    await api.patch('/recurring/$id', body);
     await refresh();
   }
 

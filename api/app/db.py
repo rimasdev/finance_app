@@ -101,6 +101,12 @@ def _ensure_user_columns() -> None:
         true_default = "1" if engine.dialect.name == "sqlite" else "TRUE"
         if "include_in_net" not in account_columns:
             statements.append(f"ALTER TABLE accounts ADD COLUMN include_in_net BOOLEAN DEFAULT {true_default}")
+    if "recurring" in inspector.get_table_names():
+        recurring_columns = {column["name"] for column in inspector.get_columns("recurring")}
+        if "provider" not in recurring_columns:
+            statements.append("ALTER TABLE recurring ADD COLUMN provider VARCHAR(80) DEFAULT ''")
+        if "currency" not in recurring_columns:
+            statements.append("ALTER TABLE recurring ADD COLUMN currency VARCHAR(8) DEFAULT 'LKR'")
     if "loans" in inspector.get_table_names() and engine.dialect.name != "sqlite":
         due = next(
             (column for column in inspector.get_columns("loans") if column["name"] == "due_on"),

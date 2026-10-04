@@ -7,6 +7,7 @@ import '../format.dart';
 import '../icons.dart';
 import '../models.dart';
 import '../store.dart';
+import '../subscriptions.dart';
 import '../theme.dart';
 import '../widgets.dart';
 
@@ -35,6 +36,7 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
   bool _details = false;
   final List<String> _tags = [];
   String? _repeatKind;
+  String? _provider;
   int _installments = 12;
   DateTime _when = DateTime.now();
   bool _busy = false;
@@ -153,13 +155,17 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
         await store.createTransaction(body);
         if (_repeatKind != null && _direction != 'transfer') {
           final next = DateTime(_when.year, _when.month + 1, _when.day);
+          final provider = _repeatKind == 'subscription' ? '' : (_provider ?? '');
           await store.createRecurring({
             'kind': _repeatKind,
             'name': body['merchant'],
+            'provider': provider,
+            'currency': 'LKR',
             'amount': amount,
             'account_id': _accountId,
             'interval': 'monthly',
             'next_on': next.toIso8601String().substring(0, 10),
+            'note': recurringFxNote(provider: provider),
             if (_repeatKind == 'installment') 'installments_total': _installments,
           });
         }
@@ -340,10 +346,14 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
     );
     if (!mounted || picked == null) return;
     if (picked.isEmpty) {
-      setState(() => _repeatKind = null);
+      setState(() {
+        _repeatKind = null;
+        _provider = null;
+      });
       return;
     }
     var count = _installments;
+    String? provider;
     if (picked == 'installment') {
       final controller = TextEditingController(text: '$_installments');
       final entered = await showDialog<String>(
@@ -373,9 +383,15 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
       if (parsed == null || parsed < 1) return;
       count = parsed;
     }
+    if (!mounted) return;
+    if (picked == 'repeat' || picked == 'installment') {
+      provider = await pickInstallmentPayment(context);
+      if (!mounted || provider == null || provider.isEmpty) return;
+    }
     setState(() {
       _repeatKind = picked;
       _installments = count;
+      _provider = provider;
     });
   }
 
@@ -695,10 +711,11 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
   }
 
   String get _repeatLabel {
+    final payment = _provider == null || _provider!.isEmpty ? '' : ' · $_provider';
     return switch (_repeatKind) {
-      'installment' => 'Installment',
+      'installment' => 'Installment$payment',
       'subscription' => 'Subscription',
-      'repeat' => 'Repeat',
+      'repeat' => 'Repeat$payment',
       _ => 'Recurring',
     };
   }
@@ -918,10 +935,10 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
             const SizedBox(height: 8),
             Text(
               _repeatKind == 'installment'
-                  ? 'Also saved as $_installments monthly installments, starting next month.'
+                  ? 'Also saved as $_installments monthly ${_provider ?? ''} installments for this shop, starting next month.'
                   : _repeatKind == 'subscription'
                   ? 'Also saved as a monthly subscription, starting next month.'
-                  : 'Also saved as a monthly repeat, starting next month.',
+                  : 'Also saved as a monthly ${_provider ?? ''} repeat for this shop, starting next month.',
               style: const TextStyle(color: FolioColors.muted, fontSize: 13),
             ),
           ],

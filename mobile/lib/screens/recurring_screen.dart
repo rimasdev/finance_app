@@ -2,9 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../format.dart';
+import '../fx.dart';
 import '../models.dart';
 import '../store.dart';
-import '../subscriptions.dart';
 import '../subscriptions.dart';
 import '../theme.dart';
 import '../widgets.dart';
@@ -97,17 +97,18 @@ class _RecurringCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final store = context.read<FolioStore>();
+    final store = context.watch<FolioStore>();
     final progress = item.installmentsTotal == null
         ? null
         : '${item.installmentsDone} of ${item.installmentsTotal}';
+    final mark = item.provider.isNotEmpty ? item.provider : item.name;
     return FolioCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              SubscriptionMark(name: item.name, size: 36),
+              SubscriptionMark(name: mark, size: 36),
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
@@ -116,7 +117,7 @@ class _RecurringCard extends StatelessWidget {
                 ),
               ),
               Text(
-                money(item.amount),
+                rupeesFor(item.amount, item.currency, store.rates),
                 style: const TextStyle(fontWeight: FontWeight.w700),
               ),
             ],
@@ -124,10 +125,12 @@ class _RecurringCard extends StatelessWidget {
           const SizedBox(height: 4),
           Text(
             [
+              if (item.provider.isNotEmpty) item.provider,
+              if (item.currency != 'LKR') foreignAmount(item.currency, item.amount),
               item.accountName,
               item.interval,
               if (item.active) 'Next ${item.nextOn}' else 'Finished',
-              if (progress != null) progress,
+              ?progress,
             ].where((part) => part.isNotEmpty).join(' · '),
             style: const TextStyle(color: FolioColors.muted, fontSize: 12),
           ),
@@ -135,6 +138,15 @@ class _RecurringCard extends StatelessWidget {
             const SizedBox(height: 8),
             Row(
               children: [
+                TextButton(
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => RecurringFormScreen(kind: item.kind, existing: item),
+                    ),
+                  ),
+                  child: const Text('Edit'),
+                ),
                 TextButton(
                   onPressed: () async {
                     try {
@@ -168,8 +180,9 @@ class _RecurringCard extends StatelessWidget {
 }
 
 class RecurringFormScreen extends StatefulWidget {
-  const RecurringFormScreen({super.key, required this.kind});
+  const RecurringFormScreen({super.key, required this.kind, this.existing});
   final String kind;
+  final RecurringModel? existing;
 
   @override
   State<RecurringFormScreen> createState() => _RecurringFormScreenState();
@@ -180,10 +193,41 @@ class _RecurringFormScreenState extends State<RecurringFormScreen> {
   final _amount = TextEditingController();
   final _count = TextEditingController(text: '12');
   String? _service;
+  String? _provider;
+  String _currency = 'LKR';
   String? _accountId;
   String _interval = 'monthly';
   DateTime _next = DateTime.now();
   bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final existing = widget.existing;
+    if (existing == null) return;
+    _amount.text = existing.amount == existing.amount.roundToDouble()
+        ? existing.amount.toStringAsFixed(0)
+        : existing.amount.toStringAsFixed(2);
+    _currency = existing.currency.isEmpty ? 'LKR' : existing.currency;
+    _accountId = existing.accountId;
+    _interval = existing.interval;
+    _next = DateTime.tryParse(existing.nextOn) ?? DateTime.now();
+    if (existing.installmentsTotal != null) _count.text = '${existing.installmentsTotal}';
+    if (widget.kind == 'subscription') {
+      final known = matchingSubscriptions('').where(
+        (name) => name.toLowerCase() == existing.name.toLowerCase(),
+      );
+      if (known.isNotEmpty) {
+        _service = known.first;
+      } else {
+        _service = 'Other';
+        _name.text = existing.name;
+      }
+    } else {
+      _name.text = existing.name;
+      if (existing.provider.isNotEmpty) _provider = existing.provider;
+    }
+  }
 
   @override
   void dispose() {
@@ -207,6 +251,12 @@ class _RecurringFormScreenState extends State<RecurringFormScreen> {
     });
   }
 
+  Future<void> _pickPayment() async {
+    final picked = await pickInstallmentPayment(context);
+    if (picked == null || !mounted) return;
+    setState(() => _provider = picked);
+  }
+
   Future<void> _pickDate() async {
     final date = await showDatePicker(
       context: context,
@@ -225,26 +275,41 @@ class _RecurringFormScreenState extends State<RecurringFormScreen> {
         ? _service!
         : _name.text.trim();
     final count = int.tryParse(_count.text.trim());
+    final needsPayment = widget.kind == 'installment' || widget.kind == 'repeat';
     if (name.isEmpty || amount == null || amount <= 0 || _accountId == null) {
-      showError(context, Exception('Add a name, an amount, and an account'));
+      showError(
+        context,
+        Exception(needsPayment ? 'Add the shop, an amount, and an account' : 'Add a name, an amount, and an account'),
+      );
+      return;
+    }
+    if (needsPayment && (_provider == null || _provider!.isEmpty)) {
+      showError(context, Exception('Choose the payment'));
       return;
     }
     if (widget.kind == 'installment' && (count == null || count < 1)) {
       showError(context, Exception('Add how many payments'));
       return;
     }
+    final provider = needsPayment ? _provider! : '';
+    final body = {
+      'name': name,
+      'provider': provider,
+      'currency': _currency,
+      'amount': amount,
+      'account_id': _accountId,
+      'interval': _interval,
+      'next_on': _next.toIso8601String().substring(0, 10),
+      'note': recurringFxNote(provider: provider, currency: _currency),
+      if (widget.kind == 'installment') 'installments_total': count,
+    };
     setState(() => _busy = true);
     try {
-      await store.createRecurring({
-        'kind': widget.kind,
-        'name': name,
-        'amount': amount,
-        'account_id': _accountId,
-        'interval': _interval,
-        'next_on': _next.toIso8601String().substring(0, 10),
-        'note': '',
-        if (widget.kind == 'installment') 'installments_total': count,
-      });
+      if (widget.existing == null) {
+        await store.createRecurring({'kind': widget.kind, ...body});
+      } else {
+        await store.updateRecurring(widget.existing!.id, body);
+      }
       if (mounted) Navigator.pop(context);
     } catch (error) {
       if (mounted) showError(context, error);
@@ -263,7 +328,7 @@ class _RecurringFormScreenState extends State<RecurringFormScreen> {
       _ => 'Repeat',
     };
     return Scaffold(
-      appBar: AppBar(title: Text(title)),
+      appBar: AppBar(title: Text(widget.existing == null ? title : 'Edit $title')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -289,20 +354,42 @@ class _RecurringFormScreenState extends State<RecurringFormScreen> {
                 decoration: const InputDecoration(hintText: 'Service name'),
               ),
             ],
-          ] else
+          ] else ...[
             TextField(
               controller: _name,
-              decoration: InputDecoration(
-                hintText: widget.kind == 'installment'
-                    ? 'What are you paying off'
-                    : 'Name',
-              ),
+              textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(hintText: 'Shop'),
             ),
+            const SizedBox(height: 10),
+            ListTile(
+              contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+              tileColor: FolioColors.card,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              leading: _provider == null ? null : SubscriptionMark(name: _provider!, size: 32),
+              title: const Text('Payment', style: TextStyle(color: FolioColors.muted, fontSize: 12)),
+              subtitle: Text(_provider ?? 'Choose Mint Pay, Koko, Payzy, or Snap'),
+              trailing: const Icon(Icons.arrow_drop_down),
+              onTap: _pickPayment,
+            ),
+          ],
           const SizedBox(height: 10),
           TextField(
             controller: _amount,
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            decoration: const InputDecoration(hintText: 'Rs. 0'),
+            decoration: InputDecoration(hintText: _currency == 'LKR' ? 'Rs. 0' : '$_currency 0'),
+          ),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<String>(
+            initialValue: _currency,
+            dropdownColor: FolioColors.card,
+            decoration: const InputDecoration(labelText: 'Currency'),
+            items: const [
+              DropdownMenuItem(value: 'LKR', child: Text('LKR')),
+              DropdownMenuItem(value: 'USD', child: Text('USD')),
+              DropdownMenuItem(value: 'EUR', child: Text('EUR')),
+              DropdownMenuItem(value: 'GBP', child: Text('GBP')),
+            ],
+            onChanged: (value) => setState(() => _currency = value ?? 'LKR'),
           ),
           const SizedBox(height: 10),
           DropdownButtonFormField<String>(

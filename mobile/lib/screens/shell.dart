@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import '../account_art.dart';
 import '../capture.dart';
 import '../format.dart';
+import '../fx.dart';
 import '../models.dart';
 import '../icons.dart';
 import '../store.dart';
@@ -392,6 +393,8 @@ class _UpcomingRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final rates = context.watch<FolioStore>().rates;
+    final mark = item.provider.isNotEmpty ? item.provider : item.name;
     return InkWell(
       onTap: () => Navigator.push(
         context,
@@ -402,11 +405,11 @@ class _UpcomingRow extends StatelessWidget {
         padding: const EdgeInsets.symmetric(vertical: 8),
         child: Row(
           children: [
-            SubscriptionMark(name: item.name, size: 28),
+            SubscriptionMark(name: mark, size: 28),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
-                '${item.name}  →  ${money(item.amount)}',
+                '${item.name}  →  ${rupeesFor(item.amount, item.currency, rates)}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(fontWeight: FontWeight.w600),

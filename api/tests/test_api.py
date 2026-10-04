@@ -1,5 +1,6 @@
 import os
 from datetime import datetime
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 os.environ["DATABASE_URL"] = "sqlite://"
@@ -506,6 +507,167 @@ def test_subscription_and_installment(client):
     done = client.post(f"/recurring/{plan.json()['id']}/pay", headers=headers)
     assert done.json()["active"] is False
     assert done.json()["installments_done"] == 1
+
+
+def test_installment_keeps_the_shop_and_posts_foreign_amounts_in_rupees(client, monkeypatch):
+    monkeypatch.setattr("app.routes._lkr_rate", lambda currency: Decimal("300"))
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    cash = client.post("/accounts", headers=headers, json={"name": "Cash", "type": "cash", "opening_balance": 5000}).json()
+    created = client.post(
+        "/recurring",
+        headers=headers,
+        json={
+            "kind": "installment",
+            "name": "Carnage",
+            "provider": "Mint Pay",
+            "currency": "USD",
+            "amount": 10,
+            "account_id": cash["id"],
+            "interval": "monthly",
+            "next_on": "2026-10-05",
+            "installments_total": 3,
+            "note": "fx:Mint Pay|USD",
+        },
+    )
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["name"] == "Carnage"
+    assert body["provider"] == "Mint Pay"
+    assert body["currency"] == "USD"
+    paid = client.post(f"/recurring/{body['id']}/pay", headers=headers)
+    assert paid.status_code == 200, paid.text
+    txns = client.get("/transactions", headers=headers).json()
+    posted = txns[0]
+    assert posted["merchant"] == "Carnage"
+    assert posted["amount"] == 3000
+    assert posted["note"] == "USD 10.00"
+
+
+def test_a_recurring_plan_can_be_edited(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    cash = client.post("/accounts", headers=headers, json={"name": "Cash", "type": "cash", "opening_balance": 0}).json()
+    created = client.post(
+        "/recurring",
+        headers=headers,
+        json={
+            "kind": "subscription",
+            "name": "Netflix",
+            "amount": 1490,
+            "account_id": cash["id"],
+            "interval": "monthly",
+            "next_on": "2026-10-05",
+        },
+    )
+    assert created.status_code == 200, created.text
+    edited = client.patch(
+        f"/recurring/{created.json()['id']}",
+        headers=headers,
+        json={"name": "Spotify", "amount": 749, "currency": "USD"},
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["name"] == "Spotify"
+    assert edited.json()["amount"] == 749
+    assert edited.json()["currency"] == "USD"
+
+
+def test_a_bank_message_settles_the_matching_plan_once(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    bank = client.post(
+        "/accounts",
+        headers=headers,
+        json={"name": "Flash", "type": "bank", "opening_balance": 5000, "last4": "3390", "sms_sender": "HNB"},
+    ).json()
+    plan = client.post(
+        "/recurring",
+        headers=headers,
+        json={
+            "kind": "subscription",
+            "name": "Dialog",
+            "amount": 2000,
+            "account_id": bank["id"],
+            "interval": "monthly",
+            "next_on": "2026-09-02",
+        },
+    )
+    assert plan.status_code == 200, plan.text
+    posted = client.post(
+        "/sms/ingest",
+        headers=headers,
+        json={"body": "LKR 2,000.00 debited from A/c XX3390 on 02/09/2026. Info: DIALOG", "sender": "HNB"},
+    )
+    assert posted.status_code == 200, posted.text
+    assert posted.json()["status"] == "posted"
+    rows = client.get("/recurring", headers=headers).json()
+    assert rows[0]["next_on"] == "2026-10-02"
+    assert rows[0]["active"] is True
+    balances = {row["name"]: row["balance"] for row in client.get("/accounts", headers=headers).json()}
+    assert balances["Flash"] == 3000
+    assert len(client.get("/transactions", headers=headers).json()) == 1
+
+
+def test_recording_the_last_installment_removes_it_and_updates_the_account(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    cash = client.post("/accounts", headers=headers, json={"name": "Cash", "type": "cash", "opening_balance": 5000}).json()
+    plan = client.post(
+        "/recurring",
+        headers=headers,
+        json={
+            "kind": "installment",
+            "name": "Carnage",
+            "provider": "Mint Pay",
+            "amount": 1000,
+            "account_id": cash["id"],
+            "interval": "monthly",
+            "next_on": "2026-10-04",
+            "installments_total": 1,
+        },
+    ).json()
+    paid = client.post(f"/recurring/{plan['id']}/pay", headers=headers)
+    assert paid.status_code == 200, paid.text
+    assert paid.json()["active"] is False
+    balances = {row["name"]: row["balance"] for row in client.get("/accounts", headers=headers).json()}
+    assert balances["Cash"] == 4000
+
+
+def test_a_manual_expense_settles_the_matching_installment_without_a_second_debit(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    cash = client.post("/accounts", headers=headers, json={"name": "Cash", "type": "cash", "opening_balance": 5000}).json()
+    client.post(
+        "/recurring",
+        headers=headers,
+        json={
+            "kind": "installment",
+            "name": "Carnage",
+            "provider": "Mint Pay",
+            "amount": 1000,
+            "account_id": cash["id"],
+            "interval": "monthly",
+            "next_on": "2026-10-04",
+            "installments_total": 1,
+        },
+    )
+    saved = client.post(
+        "/transactions",
+        headers=headers,
+        json={
+            "account_id": cash["id"],
+            "direction": "expense",
+            "amount": 1000,
+            "merchant": "Carnage",
+            "occurred_at": "2026-10-04T04:00:00",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    rows = client.get("/recurring", headers=headers).json()
+    assert rows[0]["active"] is False
+    assert len(client.get("/transactions", headers=headers).json()) == 1
+    balances = {row["name"]: row["balance"] for row in client.get("/accounts", headers=headers).json()}
+    assert balances["Cash"] == 4000
 
 
 def test_unmatched_card_can_be_linked_to_an_account(client):

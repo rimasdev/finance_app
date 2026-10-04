@@ -138,6 +138,8 @@ class Recurring(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     kind: Mapped[str] = mapped_column(String(20))
     name: Mapped[str] = mapped_column(String(120))
+    provider: Mapped[str] = mapped_column(String(80), default="")
+    currency: Mapped[str] = mapped_column(String(8), default="LKR")
     amount: Mapped[float] = mapped_column(Numeric(14, 2))
     account_id: Mapped[str | None] = mapped_column(ForeignKey("accounts.id"), nullable=True)
     interval: Mapped[str] = mapped_column(String(16), default="monthly")

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:folio/format.dart';
+import 'package:folio/fx.dart';
 import 'package:folio/models.dart';
 import 'package:folio/screens/accounts_screen.dart';
 import 'package:folio/screens/entry_screens.dart';
@@ -26,6 +27,28 @@ void main() {
     expect(subscriptionLogo('Spotify Premium'), contains('spotify.png'));
     expect(subscriptionLogo('spotfy'), contains('spotify.png'));
     expect(subscriptionLogo('Rent'), isNull);
+    expect(subscriptionLogo('Mint Pay'), contains('mintpay.png'));
+    expect(subscriptionLogo('Koko'), contains('koko.png'));
+    expect(subscriptionLogo('Payzy'), contains('payzy.png'));
+    expect(subscriptionLogo('Snap'), contains('snap.png'));
+  });
+
+  test('a foreign subscription is shown in rupees at the saved rate', () {
+    const rates = ExchangeRates(date: '2026-10-04', lkrPerUsd: 300, usdPerEur: 0.5, usdPerGbp: 0.75);
+    expect(rupeesFor(10, 'USD', rates), money(3000));
+    expect(rupeesFor(1, 'EUR', rates), money(600));
+    expect(rupeesFor(10, 'LKR', rates), money(10));
+    expect(rupeesFor(10, 'USD', null), 'USD 10.00');
+    final saved = RecurringModel.fromJson({
+      'id': '1',
+      'kind': 'installment',
+      'name': 'Carnage',
+      'amount': 1077.71,
+      'note': 'fx:Mint Pay|USD',
+    });
+    expect(saved.provider, 'Mint Pay');
+    expect(saved.currency, 'USD');
+    expect(saved.note, isEmpty);
   });
 
   test('month keys stay zero padded', () {
@@ -332,6 +355,23 @@ void main() {
     await tester.pump();
     expect(find.text('Peo TV'), findsOneWidget);
     expect(find.text('Netflix'), findsNothing);
+  });
+
+  testWidgets('an installment asks for the shop and the payment', (tester) async {
+    await tester.pumpWidget(
+      ChangeNotifierProvider(
+        create: (_) => FolioStore(),
+        child: MaterialApp(
+          theme: buildFolioTheme(),
+          home: const RecurringFormScreen(kind: 'installment'),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Choose Mint Pay, Koko, Payzy, or Snap'), findsOneWidget);
+    expect(find.text('Currency'), findsOneWidget);
+    final shop = tester.widget<TextField>(find.byType(TextField).first);
+    expect(shop.decoration?.hintText, 'Shop');
   });
 
   testWidgets('a withdrawal can be changed into a transfer to cash', (
