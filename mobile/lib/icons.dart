@@ -18,6 +18,10 @@ IconData iconFor(String key) {
       return Icons.spa_rounded;
     case 'shopping':
       return Icons.shopping_bag_rounded;
+    case 'groceries':
+      return Icons.shopping_basket_rounded;
+    case 'spices':
+      return Icons.eco_rounded;
     case 'gifts':
       return Icons.card_giftcard_rounded;
     case 'education':

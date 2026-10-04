@@ -45,7 +45,7 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
       appBar: AppBar(title: const Text('Categories')),
       floatingActionButton: FloatingActionButton(
         backgroundColor: FolioColors.green,
-        foregroundColor: Colors.black,
+        foregroundColor: FolioColors.greenInk,
         onPressed: _add,
         child: const Icon(Icons.add),
       ),

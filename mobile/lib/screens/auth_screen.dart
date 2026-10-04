@@ -70,11 +70,14 @@ class _AuthScreenState extends State<AuthScreen> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(28, 48, 28, 28),
           children: [
-            const SizedBox(height: 24),
-            const Text(
-              'TAKINGS',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800, letterSpacing: 3, color: FolioColors.green),
+            const SizedBox(height: 12),
+            Center(
+              child: Image.asset(
+                'assets/logo.png',
+                width: 148,
+                height: 148,
+                filterQuality: FilterQuality.high,
+              ),
             ),
             const SizedBox(height: 36),
             const Text(

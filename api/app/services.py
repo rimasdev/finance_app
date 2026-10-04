@@ -8,9 +8,12 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models import Account, Budget, Category, Transaction, User, utcnow
-from app.sms_parser import parse_sms
+from app.sms_parser import looks_like_withdrawal, parse_sms
 
 EXPENSE_CATEGORIES = [
+    ("Groceries", "groceries", "#8ED4B0"),
+    ("Spices", "spices", "#E7C27A"),
+    ("Shopping", "shopping", "#34D399"),
     ("Transport", "transport", "#7EB6FF"),
     ("Utilities", "utilities", "#F5C542"),
     ("Health care", "health", "#FF6B6B"),
@@ -18,7 +21,6 @@ EXPENSE_CATEGORIES = [
     ("Dining out", "dining", "#FB923C"),
     ("Entertainment", "entertainment", "#F472B6"),
     ("Personal care", "personal", "#A78BFA"),
-    ("Shopping", "shopping", "#34D399"),
     ("Gifts/Donation", "gifts", "#F87171"),
     ("Education", "education", "#60A5FA"),
     ("Work", "work", "#E7B8A3"),
@@ -56,6 +58,8 @@ def user_json(user: User) -> dict:
         "currency": user.currency,
         "timezone": user.timezone,
         "month_start_day": user.month_start_day,
+        "withdrawal_to_cash": bool(user.withdrawal_to_cash),
+        "cash_account_id": user.cash_account_id,
     }
 
 
@@ -106,15 +110,20 @@ def iso(dt: datetime) -> str:
     return dt.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def fee_amount(txn: Transaction) -> Decimal:
+    return Decimal(str(txn.bank_charge or 0))
+
+
 def effect(txn: Transaction, account_id: str) -> Decimal:
     amount = Decimal(str(txn.amount))
     if txn.direction == "expense" and txn.account_id == account_id:
         return -amount
     if txn.direction == "income" and txn.account_id == account_id:
         return amount
-    if txn.direction == "transfer":
+    if txn.direction in {"transfer", "loan"}:
         if txn.account_id == account_id:
-            return -amount
+            charge = fee_amount(txn) if txn.direction == "transfer" else Decimal("0")
+            return -(amount + charge)
         if txn.transfer_account_id == account_id:
             return amount
     return Decimal("0")
@@ -144,10 +153,13 @@ def account_json(db: Session, account: Account) -> dict:
         "purpose": account.purpose,
         "bank_name": account.bank_name or "",
         "last4": account.last4 or "",
+        "card_last4s": [part for part in (account.card_last4s or "").split(",") if part],
         "sms_sender": account.sms_sender or "",
         "opening_balance": money(account.opening_balance or 0),
         "balance": money(account_balance(db, account)),
         "automations_enabled": account.automations_enabled,
+        "preferred": bool(account.preferred),
+        "include_in_net": bool(account.include_in_net),
         "archived": account.archived,
     }
 
@@ -172,16 +184,45 @@ def txn_json(txn: Transaction, accounts: dict[str, Account], categories: dict[st
         "transfer_account_name": other.name if other else "",
         "category_id": txn.category_id,
         "category_name": category.name if category else "",
-        "category_icon": category.icon if category else "other",
+        "category_icon": category.icon if category else ("debt" if txn.direction == "loan" else "other"),
         "category_color": category.color if category else "#9CA3AF",
         "direction": txn.direction,
         "amount": money(txn.amount),
+        "bank_charge": money(txn.bank_charge or 0),
         "merchant": txn.merchant,
         "note": txn.note or "",
+        "tags": txn.tags or "",
         "occurred_at": iso(txn.occurred_at),
         "scope": txn.scope,
         "source": txn.source,
         "status": txn.status,
+        "hidden": bool(txn.hidden),
+        "card_last4": txn.card_last4 or "",
+    }
+
+
+def loan_json(loan, accounts: dict[str, Account], repaid: Decimal) -> dict:
+    principal = Decimal(str(loan.amount))
+    remaining = principal - repaid
+    account = accounts.get(loan.account_id or "")
+    other = accounts.get(loan.counterparty_account_id or "")
+    due = loan.due_on.date() if isinstance(loan.due_on, datetime) else loan.due_on
+    return {
+        "id": loan.id,
+        "kind": loan.kind,
+        "party_kind": loan.party_kind,
+        "party_name": loan.party_name,
+        "counterparty_account_id": loan.counterparty_account_id,
+        "counterparty_account_name": other.name if other else "",
+        "account_id": loan.account_id,
+        "account_name": account.name if account else "",
+        "amount": money(principal),
+        "repaid": money(repaid),
+        "remaining": money(remaining if remaining > 0 else 0),
+        "due_on": due.isoformat() if due else None,
+        "note": loan.note or "",
+        "opened_at": iso(loan.opened_at),
+        "settled": remaining <= 0,
     }
 
 
@@ -206,19 +247,29 @@ def dashboard(db: Session, user: User) -> dict:
     tz = ZoneInfo(user.timezone or "Asia/Colombo")
     now = datetime.now(tz)
     today_start, today_end = utc_window(now.date(), now.date(), user.timezone)
-    accounts = db.query(Account).filter_by(user_id=user.id, archived=False).order_by(Account.created_at).all()
+    accounts = (
+        db.query(Account)
+        .filter_by(user_id=user.id, archived=False)
+        .order_by(Account.sort_order, Account.created_at)
+        .all()
+    )
     categories = category_map(db, user.id)
     rows = posted_in_window(db, user, start, end)
     spent_today = Decimal("0")
     by_category: dict[str, Decimal] = {}
     for txn in rows:
+        if txn.hidden:
+            continue
+        fee = fee_amount(txn) if txn.direction == "transfer" else Decimal("0")
+        if fee and today_start <= txn.occurred_at < today_end:
+            spent_today += fee
         if txn.direction != "expense":
             continue
         if today_start <= txn.occurred_at < today_end:
             spent_today += Decimal(str(txn.amount))
         key = txn.category_id or ""
         by_category[key] = by_category.get(key, Decimal("0")) + Decimal(str(txn.amount))
-    top = sorted(by_category.items(), key=lambda item: item[1], reverse=True)[:4]
+    top = sorted(by_category.items(), key=lambda item: item[1], reverse=True)
     spenders = []
     for category_id, amount in top:
         category = categories.get(category_id)
@@ -241,6 +292,7 @@ def dashboard(db: Session, user: User) -> dict:
         "accounts": [account_json(db, account) for account in accounts],
         "top_spenders": spenders,
         "review_count": review_count,
+        "sms_count": db.query(Transaction).filter_by(user_id=user.id, source="sms", status="posted").count(),
         "period": {"from": start_d.isoformat(), "to": end_d.isoformat()},
     }
 
@@ -253,6 +305,12 @@ def insights(db: Session, user: User, month_value: str | None) -> dict:
     totals: dict[str, Decimal] = {}
     grand = Decimal("0")
     for txn in posted_in_window(db, user, start, end):
+        if txn.hidden:
+            continue
+        fee = fee_amount(txn) if txn.direction == "transfer" else Decimal("0")
+        if fee:
+            grand += fee
+            totals["__fee__"] = totals.get("__fee__", Decimal("0")) + fee
         if txn.direction != "expense":
             continue
         grand += Decimal(str(txn.amount))
@@ -264,10 +322,10 @@ def insights(db: Session, user: User, month_value: str | None) -> dict:
         percent = float((amount / grand) * 100) if grand else 0
         slices.append(
             {
-                "category_id": category_id or None,
-                "name": category.name if category else "Uncategorised",
-                "icon": category.icon if category else "other",
-                "color": category.color if category else "#9CA3AF",
+                "category_id": None if category_id in {"", "__fee__"} else category_id,
+                "name": "Bank charges" if category_id == "__fee__" else (category.name if category else "Uncategorised"),
+                "icon": "other" if category_id == "__fee__" else (category.icon if category else "other"),
+                "color": "#9CA3AF" if category_id == "__fee__" else (category.color if category else "#9CA3AF"),
                 "amount": money(amount),
                 "percent": round(percent, 1),
             }
@@ -283,6 +341,8 @@ def insights(db: Session, user: User, month_value: str | None) -> dict:
 
 
 def _counts_for_header(txn: Transaction, account_id: str | None) -> str | None:
+    if txn.direction == "loan":
+        return None
     if txn.direction == "expense":
         if account_id and txn.account_id != account_id:
             return None
@@ -319,6 +379,8 @@ def timeline(
     needle = (query or "").strip().lower()
     tz = ZoneInfo(user.timezone or "Asia/Colombo")
     for txn in posted_in_window(db, user, start, end):
+        if txn.hidden and not account_id:
+            continue
         if scope in {"personal", "business"} and txn.scope != scope:
             continue
         if account_id and txn.account_id != account_id and txn.transfer_account_id != account_id:
@@ -326,10 +388,15 @@ def timeline(
         bucket = _counts_for_header(txn, account_id)
         if needle and needle not in (txn.merchant or "").lower() and needle not in (txn.note or "").lower():
             continue
+        fee = fee_amount(txn) if txn.direction == "transfer" else Decimal("0")
         if bucket == "income":
             income += Decimal(str(txn.amount))
         elif bucket == "expense":
             expenses += Decimal(str(txn.amount))
+            if txn.direction == "transfer" and (account_id is None or txn.account_id == account_id):
+                expenses += fee
+        elif fee and account_id is None:
+            expenses += fee
         local_day = txn.occurred_at.replace(tzinfo=timezone.utc).astimezone(tz).date().isoformat()
         group = days.setdefault(local_day, {"date": local_day, "items": [], "total": Decimal("0")})
         signed = Decimal("0")
@@ -337,6 +404,10 @@ def timeline(
             signed = Decimal(str(txn.amount))
         elif bucket == "expense":
             signed = -Decimal(str(txn.amount))
+            if txn.direction == "transfer" and txn.account_id == account_id:
+                signed -= fee
+        elif fee and account_id is None:
+            signed = -fee
         group["total"] += signed
         group["items"].append(txn_json(txn, accounts, categories))
     day_rows = []
@@ -366,9 +437,25 @@ def budget_rows(db: Session, user: User, month_value: str | None) -> list[dict]:
     start, end = utc_window(start_d, end_d, user.timezone)
     categories = category_map(db, user.id)
     accounts = account_map(db, user.id)
+    children: dict[str, list[str]] = {}
+    for category in categories.values():
+        if category.parent_id:
+            children.setdefault(category.parent_id, []).append(category.id)
+
+    def covered(category_id: str) -> set[str]:
+        found = {category_id}
+        pending = [category_id]
+        while pending:
+            current = pending.pop()
+            for child in children.get(current, []):
+                if child not in found:
+                    found.add(child)
+                    pending.append(child)
+        return found
+
     spent: dict[tuple[str | None, str | None], Decimal] = {}
     for txn in posted_in_window(db, user, start, end):
-        if txn.direction != "expense":
+        if txn.hidden or txn.direction != "expense":
             continue
         key = (txn.category_id, txn.account_id)
         spent[key] = spent.get(key, Decimal("0")) + Decimal(str(txn.amount))
@@ -376,7 +463,7 @@ def budget_rows(db: Session, user: User, month_value: str | None) -> list[dict]:
     for budget in db.query(Budget).filter_by(user_id=user.id).order_by(Budget.created_at).all():
         used = Decimal("0")
         for (category_id, account_id), amount in spent.items():
-            if budget.category_id and category_id != budget.category_id:
+            if budget.category_id and category_id not in covered(budget.category_id):
                 continue
             if budget.account_id and account_id != budget.account_id:
                 continue
@@ -406,6 +493,22 @@ def _norm(value: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", (value or "").upper())
 
 
+def remember_card(account: Account, last4: str | None) -> None:
+    digits = (last4 or "").strip()
+    if len(digits) != 4 or not digits.isdigit() or account.last4 == digits:
+        return
+    current = [part for part in (account.card_last4s or "").split(",") if part]
+    if digits not in current:
+        current.append(digits)
+    account.card_last4s = ",".join(current)
+
+
+def _has_last4(account: Account, last4: str) -> bool:
+    if account.last4 == last4:
+        return True
+    return last4 in {part for part in (account.card_last4s or "").split(",") if part}
+
+
 def match_account(db: Session, user_id: str, last4: str | None, sender: str, body: str) -> Account | None:
     accounts = db.query(Account).filter_by(user_id=user_id, archived=False).all()
 
@@ -418,16 +521,22 @@ def match_account(db: Session, user_id: str, last4: str | None, sender: str, bod
             return True
         return key in _norm(body[:160])
 
-    by_last4 = [account for account in accounts if account.last4 and last4 and account.last4 == last4[-4:]]
+    def preferred_of(candidates: list[Account]) -> Account | None:
+        chosen = [account for account in candidates if account.preferred]
+        return chosen[0] if len(chosen) == 1 else None
+
+    by_last4 = [account for account in accounts if last4 and _has_last4(account, last4[-4:])]
     if last4:
         if len(by_last4) == 1:
             return by_last4[0]
         if len(by_last4) > 1:
             narrowed = [account for account in by_last4 if sender_match(account)]
-            return narrowed[0] if len(narrowed) == 1 else None
+            if len(narrowed) == 1:
+                return narrowed[0]
+            return preferred_of(narrowed or by_last4)
         return None
     by_sender = [account for account in accounts if sender_match(account)]
-    return by_sender[0] if len(by_sender) == 1 else None
+    return preferred_of(by_sender) or (by_sender[0] if len(by_sender) == 1 else None)
 
 
 def _category_for_hint(db: Session, user_id: str, hint: str | None, direction: str) -> Category | None:
@@ -439,6 +548,38 @@ def _category_for_hint(db: Session, user_id: str, hint: str | None, direction: s
         .filter(Category.user_id == user_id, Category.kind == kind, Category.name.ilike(hint))
         .first()
     )
+
+
+def cash_destination(db: Session, user: User, source_id: str) -> Account | None:
+    rows = (
+        db.query(Account)
+        .filter(
+            Account.user_id == user.id,
+            Account.archived.is_(False),
+            Account.type == "cash",
+            Account.id != source_id,
+        )
+        .order_by(Account.sort_order, Account.created_at)
+        .all()
+    )
+    if user.cash_account_id:
+        chosen = next((row for row in rows if row.id == user.cash_account_id), None)
+        if chosen is not None:
+            return chosen
+    return rows[0] if rows else None
+
+
+def apply_withdrawal_transfer(db: Session, user: User, txn: Transaction) -> None:
+    if not user.withdrawal_to_cash or txn.direction != "expense" or not txn.account_id:
+        return
+    if not looks_like_withdrawal(txn.raw_sms or "", txn.merchant or "", txn.direction):
+        return
+    cash = cash_destination(db, user, txn.account_id)
+    if cash is None:
+        return
+    txn.direction = "transfer"
+    txn.transfer_account_id = cash.id
+    txn.category_id = None
 
 
 def body_hash(body: str) -> str:
@@ -512,8 +653,10 @@ def ingest_sms(
         sms_hash=digest,
         fingerprint=parsed.fingerprint,
         raw_sms=body.strip(),
+        card_last4=(parsed.last4 or "")[-4:] if parsed.last4 else "",
     )
     db.add(txn)
+    apply_withdrawal_transfer(db, user, txn)
     db.commit()
     db.refresh(txn)
     accounts = account_map(db, user.id)

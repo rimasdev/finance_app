@@ -5,6 +5,7 @@ import '../format.dart';
 import '../store.dart';
 import '../theme.dart';
 import '../widgets.dart';
+import 'entry_screens.dart';
 import 'insights_screen.dart';
 
 class TimelineScreen extends StatefulWidget {
@@ -12,6 +13,18 @@ class TimelineScreen extends StatefulWidget {
 
   @override
   State<TimelineScreen> createState() => _TimelineScreenState();
+}
+
+double _netBalance(FolioStore store) {
+  final accounts = store.accounts.where((account) {
+    if (store.accountFilter != null && account.id != store.accountFilter)
+      return false;
+    if (store.scope == 'personal' && account.isBusiness) return false;
+    if (store.scope == 'business' && !account.isBusiness) return false;
+    if (store.accountFilter == null && !account.includeInNet) return false;
+    return true;
+  });
+  return accounts.fold(0.0, (sum, account) => sum + account.balance);
 }
 
 class _TimelineScreenState extends State<TimelineScreen> {
@@ -30,15 +43,18 @@ class _TimelineScreenState extends State<TimelineScreen> {
     final data = store.timeline;
     final accountName = store.accountFilter == null
         ? 'All accounts'
-        : store.accounts.where((account) => account.id == store.accountFilter).map((account) => account.name).firstOrNull ??
-            'All accounts';
+        : store.accounts
+                  .where((account) => account.id == store.accountFilter)
+                  .map((account) => account.name)
+                  .firstOrNull ??
+              'All accounts';
     return Scaffold(
       body: SafeArea(
         child: RefreshIndicator(
           color: FolioColors.green,
           onRefresh: store.refresh,
           child: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 96),
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 120),
             children: [
               Row(
                 children: [
@@ -47,7 +63,9 @@ class _TimelineScreenState extends State<TimelineScreen> {
                         ? TextField(
                             controller: _search,
                             autofocus: true,
-                            decoration: const InputDecoration(hintText: 'Search merchant'),
+                            decoration: const InputDecoration(
+                              hintText: 'Search merchant',
+                            ),
                             onSubmitted: store.setSearch,
                           )
                         : Align(
@@ -56,12 +74,21 @@ class _TimelineScreenState extends State<TimelineScreen> {
                               initialValue: store.accountFilter,
                               onSelected: store.setAccountFilter,
                               itemBuilder: (context) => [
-                                const PopupMenuItem(value: null, child: Text('All accounts')),
+                                const PopupMenuItem(
+                                  value: null,
+                                  child: Text('All accounts'),
+                                ),
                                 for (final account in store.accounts)
-                                  PopupMenuItem(value: account.id, child: Text(account.name)),
+                                  PopupMenuItem(
+                                    value: account.id,
+                                    child: Text(account.name),
+                                  ),
                               ],
                               child: Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 8,
+                                ),
                                 decoration: BoxDecoration(
                                   color: FolioColors.card,
                                   borderRadius: BorderRadius.circular(20),
@@ -69,9 +96,17 @@ class _TimelineScreenState extends State<TimelineScreen> {
                                 child: Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    const Icon(Icons.account_balance_wallet_outlined, size: 16),
+                                    const Icon(
+                                      Icons.account_balance_wallet_outlined,
+                                      size: 16,
+                                    ),
                                     const SizedBox(width: 6),
-                                    Flexible(child: Text(accountName, overflow: TextOverflow.ellipsis)),
+                                    Flexible(
+                                      child: Text(
+                                        accountName,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
                                     const Icon(Icons.arrow_drop_down),
                                   ],
                                 ),
@@ -86,27 +121,57 @@ class _TimelineScreenState extends State<TimelineScreen> {
                 ],
               ),
               MonthSwitcher(
-                label: data == null ? monthTitle(store.month) : shortRange(data.from, data.to),
+                label: data == null
+                    ? monthTitle(store.month)
+                    : shortRange(data.from, data.to),
                 onPrevious: () => store.shiftMonth(-1),
                 onNext: () => store.shiftMonth(1),
               ),
               const SizedBox(height: 8),
               ChoiceChipRow(
                 labels: const ['All', 'Personal', 'Business'],
-                selected: store.scope == 'business' ? 2 : store.scope == 'personal' ? 1 : 0,
-                onSelect: (index) => store.setScope(index == 2 ? 'business' : index == 1 ? 'personal' : 'all'),
+                selected: store.scope == 'business'
+                    ? 2
+                    : store.scope == 'personal'
+                    ? 1
+                    : 0,
+                onSelect: (index) => store.setScope(
+                  index == 2
+                      ? 'business'
+                      : index == 1
+                      ? 'personal'
+                      : 'all',
+                ),
               ),
               const SizedBox(height: 16),
-              const Text('Net balance', style: TextStyle(color: FolioColors.muted)),
+              const Text(
+                'Net balance',
+                style: TextStyle(color: FolioColors.muted),
+              ),
               Text(
-                money(data?.net ?? 0, accounting: true),
-                style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w700),
+                money(_netBalance(store), accounting: true),
+                style: const TextStyle(
+                  fontSize: 32,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
               const SizedBox(height: 12),
               Row(
                 children: [
-                  Expanded(child: _Total(label: 'Income', value: data?.income ?? 0, color: FolioColors.green)),
-                  Expanded(child: _Total(label: 'Expenses', value: data?.expenses ?? 0, color: FolioColors.red)),
+                  Expanded(
+                    child: _Total(
+                      label: 'Income',
+                      value: data?.income ?? 0,
+                      color: FolioColors.green,
+                    ),
+                  ),
+                  Expanded(
+                    child: _Total(
+                      label: 'Expenses',
+                      value: data?.expenses ?? 0,
+                      color: FolioColors.red,
+                    ),
+                  ),
                 ],
               ),
               const SizedBox(height: 8),
@@ -123,8 +188,16 @@ class _TimelineScreenState extends State<TimelineScreen> {
                     padding: const EdgeInsets.only(top: 18, bottom: 8),
                     child: Row(
                       children: [
-                        Expanded(child: Text(longDay(day.date), style: const TextStyle(fontWeight: FontWeight.w700))),
-                        Text(money(day.total), style: const TextStyle(color: FolioColors.muted)),
+                        Expanded(
+                          child: Text(
+                            longDay(day.date),
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                        Text(
+                          money(day.total),
+                          style: const TextStyle(color: FolioColors.muted),
+                        ),
                       ],
                     ),
                   ),
@@ -132,6 +205,16 @@ class _TimelineScreenState extends State<TimelineScreen> {
                     TxnTile(
                       txn: txn,
                       onTap: () async {
+                        if (txn.direction != 'loan') {
+                          await Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) =>
+                                  TransactionFormScreen(existing: txn),
+                            ),
+                          );
+                          return;
+                        }
                         final removed = await showModalBottomSheet<bool>(
                           context: context,
                           backgroundColor: FolioColors.card,
@@ -139,9 +222,19 @@ class _TimelineScreenState extends State<TimelineScreen> {
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                ListTile(title: Text(txn.merchant), subtitle: Text(txn.note.isEmpty ? txn.categoryName : txn.note)),
                                 ListTile(
-                                  leading: const Icon(Icons.delete_outline, color: FolioColors.red),
+                                  title: Text(txn.merchant),
+                                  subtitle: Text(
+                                    txn.note.isEmpty
+                                        ? txn.categoryName
+                                        : txn.note,
+                                  ),
+                                ),
+                                ListTile(
+                                  leading: const Icon(
+                                    Icons.delete_outline,
+                                    color: FolioColors.red,
+                                  ),
                                   title: const Text('Delete'),
                                   onTap: () => Navigator.pop(context, true),
                                 ),
@@ -181,7 +274,14 @@ class _Total extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(label, style: const TextStyle(color: FolioColors.muted)),
-        Text(money(value), style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 16)),
+        Text(
+          money(value),
+          style: TextStyle(
+            color: color,
+            fontWeight: FontWeight.w700,
+            fontSize: 16,
+          ),
+        ),
       ],
     );
   }

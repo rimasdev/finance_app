@@ -1,3 +1,5 @@
+import 'package:flutter/services.dart';
+
 const _months = [
   'Jan',
   'Feb',
@@ -38,6 +40,46 @@ const _weekdays = [
   'Sunday',
 ];
 
+class GroupedAmountFormatter extends TextInputFormatter {
+  const GroupedAmountFormatter();
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final raw = newValue.text.replaceAll(',', '');
+    if (raw.isEmpty) return const TextEditingValue(text: '');
+    if (!RegExp(r'^\d*\.?\d{0,2}$').hasMatch(raw)) return oldValue;
+    final dot = raw.indexOf('.');
+    final whole = dot == -1 ? raw : raw.substring(0, dot);
+    final fraction = dot == -1 ? '' : raw.substring(dot);
+    final text = '${_groupDigits(whole)}$fraction';
+    final end = newValue.selection.baseOffset.clamp(0, newValue.text.length);
+    final digitsBefore = newValue.text.substring(0, end).replaceAll(',', '').length;
+    var offset = 0;
+    var seen = 0;
+    while (offset < text.length && seen < digitsBefore) {
+      if (text[offset] != ',') seen += 1;
+      offset += 1;
+    }
+    return TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: offset),
+    );
+  }
+}
+
+String _groupDigits(String whole) {
+  if (whole.isEmpty) return '';
+  final buffer = StringBuffer();
+  for (var i = 0; i < whole.length; i++) {
+    if (i > 0 && (whole.length - i) % 3 == 0) buffer.write(',');
+    buffer.write(whole[i]);
+  }
+  return buffer.toString();
+}
+
 String money(num value, {bool accounting = false}) {
   final negative = value < 0;
   final fixed = value.abs().toStringAsFixed(2).split('.');
@@ -63,6 +105,15 @@ String longDay(DateTime value) =>
     '${_weekdays[value.weekday - 1]}, ${value.day} ${_monthsFull[value.month - 1]}';
 
 String monthTitle(DateTime value) => '${_monthsFull[value.month - 1]} ${value.year}';
+
+String stamp(DateTime value) {
+  final now = DateTime.now();
+  final today = now.year == value.year && now.month == value.month && now.day == value.day;
+  final day = today
+      ? 'Today, ${value.day} ${_months[value.month - 1]} ${value.year}'
+      : '${value.day} ${_months[value.month - 1]} ${value.year}';
+  return '$day  |  ${clock(value)}';
+}
 
 String clock(DateTime value) {
   final hour = value.hour % 12 == 0 ? 12 : value.hour % 12;

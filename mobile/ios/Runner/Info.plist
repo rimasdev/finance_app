@@ -44,6 +44,10 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Takings uses a photo you choose as the icon for an account.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Takings uses your contacts so you can pick the person you lent to or borrowed from.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

@@ -14,24 +14,27 @@ struct SaveBankSmsIntent: AppIntent {
     var sender: String
 
     static var parameterSummary: some ParameterSummary {
-        Summary("Save data to Takings")
+        Summary("Save data to Takings") {
+            \.$message
+            \.$sender
+        }
     }
 
-    func perform() async throws -> some IntentResult & ProvidesDialog {
+    func perform() async throws -> some IntentResult {
         let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.isEmpty {
-            return .result(dialog: "That shortcut had no message to save.")
+            return .result()
         }
         let defaults = UserDefaults.standard
         guard let token = defaults.string(forKey: "flutter.token"), !token.isEmpty else {
-            return .result(dialog: "Open Takings and sign in, then run this shortcut again.")
+            return .result()
         }
         var base = defaults.string(forKey: "flutter.baseUrl") ?? "https://api.takings.alphabet.lk"
         while base.hasSuffix("/") {
             base.removeLast()
         }
         guard let url = URL(string: base + "/sms/ingest") else {
-            return .result(dialog: "Takings does not have a valid server address.")
+            return .result()
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -42,22 +45,8 @@ struct SaveBankSmsIntent: AppIntent {
             "sender": sender,
             "manual": false,
         ])
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        if status == 401 {
-            return .result(dialog: "Sign in to Takings again, then the shortcut can save messages.")
-        }
-        if status >= 400 {
-            return .result(dialog: "Takings could not save that message.")
-        }
-        let saved = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["status"] as? String
-        if saved == "duplicate" {
-            return .result(dialog: "That message is already in Takings.")
-        }
-        if saved == "ignored" {
-            return .result(dialog: "Takings left that message alone. It does not look like a payment.")
-        }
-        return .result(dialog: "Saved to Takings.")
+        _ = try await URLSession.shared.data(for: request)
+        return .result()
     }
 }
 

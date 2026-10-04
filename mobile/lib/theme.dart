@@ -1,13 +1,15 @@
 import 'package:flutter/material.dart';
 
 class FolioColors {
-  static const bg = Color(0xFF0C0C0E);
-  static const card = Color(0xFF17171B);
-  static const cardHigh = Color(0xFF212126);
-  static const line = Color(0xFF2C2C32);
-  static const green = Color(0xFF2FCB6E);
-  static const greenInk = Color(0xFF07140C);
-  static const red = Color(0xFFFF5C5C);
+  static const bg = Color(0xFF181A19);
+  static const card = Color(0xFF262624);
+  static const cardHigh = Color(0xFF2E2E2C);
+  static const line = Color(0xFF343432);
+  static const accent = Color(0xFFC5D7F6);
+  static const accentInk = Color(0xFF1E2430);
+  static const green = Color(0xFF8ED4B0);
+  static const greenInk = Color(0xFF143024);
+  static const red = Color(0xFFF0A0A0);
   static const muted = Color(0xFF9B9BA6);
   static const text = Color(0xFFF4F4F5);
 }
@@ -16,14 +18,20 @@ ThemeData buildFolioTheme() {
   const scheme = ColorScheme.dark(
     primary: FolioColors.green,
     onPrimary: FolioColors.greenInk,
-    surface: FolioColors.bg,
+    surface: FolioColors.card,
     error: FolioColors.red,
   );
+  final base = ThemeData.dark(useMaterial3: true);
   return ThemeData(
     useMaterial3: true,
     brightness: Brightness.dark,
     scaffoldBackgroundColor: FolioColors.bg,
     colorScheme: scheme,
+    textTheme: base.textTheme.apply(
+      bodyColor: FolioColors.text,
+      displayColor: FolioColors.text,
+    ),
+    iconTheme: const IconThemeData(color: FolioColors.text),
     dividerColor: FolioColors.line,
     appBarTheme: const AppBarTheme(
       backgroundColor: FolioColors.bg,
@@ -46,5 +54,12 @@ ThemeData buildFolioTheme() {
       ),
     ),
     snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
+    dialogTheme: const DialogThemeData(backgroundColor: FolioColors.card),
+    bottomSheetTheme: const BottomSheetThemeData(
+      backgroundColor: FolioColors.bg,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+    ),
   );
 }

@@ -17,13 +17,17 @@ DEBIT_RE = re.compile(
 )
 CREDIT_RE = re.compile(r"(?i)\b(credited|credit|deposited|deposit|received|refund(?:ed)?)\b")
 OTP_RE = re.compile(r"(?i)\b(otp|one[- ]time password|verification code)\b")
+DECLINED_RE = re.compile(
+    r"(?i)\b(declined|insufficient funds|attempted transaction|unsuccessful|transaction failed|was not authorised|was not authorized)\b"
+)
 BALANCE_RE = re.compile(r"(?i)\b(?:avl|available|avbl|cleared)?\s*\.?\s*bal(?:ance)?\b")
 LAST4_RES = [
     re.compile(r"(?i)(?:a/?c(?:ct|count)?|card|acct)\b[^\d]{0,20}(\d{4})\b"),
     re.compile(r"(?:\*{2,}|x{2,})(\d{4})\b", re.I),
-    re.compile(r"(?i)\b(?:ending|no\.?)\s*(\d{4})\b"),
+    re.compile(r"(?i)\b(?:ending|no\.?)\s*#?\s*(\d{4})\b"),
 ]
 MERCHANT_RES = [
+    re.compile(r"(?i)\b(?:purchase|withdrawal|withdrawn)\s+at\s+(.+?)\s+(?:LK\s+)?for\b"),
     re.compile(
         r"(?i)(?:info|desc|description|details|narration|remarks?|merchant|ref|reference)\s*[:\-]\s*([A-Za-z0-9][A-Za-z0-9 .&'*/_-]{1,80})"
     ),
@@ -51,15 +55,27 @@ MONTHS = {
 }
 
 CATEGORY_RULES = [
-    (re.compile(r"(?i)uber|pickme|kangaroo|petrol|diesel|ceypetco|ioc|fuel"), "Transport"),
-    (re.compile(r"(?i)\b(dialog|mobitel|hutch|airtel|slt|lanka bell|leco|ceb)\b"), "Utilities"),
-    (re.compile(r"(?i)keells|cargills|arpico|glomark|spar\b|supermarket"), "Shopping"),
-    (re.compile(r"(?i)\b(kfc|mcdonald|pizza|restaurant|cafe|dining)\b"), "Dining out"),
-    (re.compile(r"(?i)hospital|pharmacy|health|dental|clinic"), "Health care"),
-    (re.compile(r"(?i)netflix|spotify|cinema|movie"), "Entertainment"),
+    (re.compile(r"(?i)uber|pickme|kangaroo|petrol|diesel|ceypetco|\bioc\b|fuel|filling station"), "Transport"),
+    (re.compile(r"(?i)\b(dialog|mobitel|hutch|airtel|slt|lanka bell|leco|ceb|peo\s*tv)\b"), "Utilities"),
+    (
+        re.compile(
+            r"(?i)keells|cargills|arpico|glomark|\bspar\b|supermarket|food\s*city|laughfs|odel|"
+            r"softlogic|nolimit|cool planet|spa ceylon|kids mania|toy|fashion|cotton collection"
+        ),
+        "Shopping",
+    ),
+    (
+        re.compile(
+            r"(?i)\b(kfc|mcdonald|pizza|dominos|burger|subway|restaurant|cafe|coffee|dining|"
+            r"bakery|bakers|baker|bar|pub|juice|lovers point)\b"
+        ),
+        "Dining out",
+    ),
+    (re.compile(r"(?i)hospital|pharmacy|osusala|healthguard|asiri|nawaloka|dental|clinic|\bhealth\b"), "Health care"),
+    (re.compile(r"(?i)netflix|spotify|youtube|cinema|movie|scope cinema|apple\.com|google play|steam"), "Entertainment"),
     (re.compile(r"(?i)\b(salary|payroll)\b"), "Salary"),
     (re.compile(r"(?i)school|university|tuition|college"), "Education"),
-    (re.compile(r"(?i)\b(transfer|fund transfer)\b"), "Transfers"),
+    (re.compile(r"(?i)\b(fund transfer|online transfer|ceft|slip transfer)\b"), "Transfers"),
 ]
 
 
@@ -76,6 +92,7 @@ class ParsedSms:
     category_hint: str | None = None
     fingerprint: str | None = None
     reason: str | None = None
+    withdrawal: bool = False
 
     def as_dict(self) -> dict:
         return {
@@ -89,6 +106,7 @@ class ParsedSms:
             "balance": float(self.balance) if self.balance is not None else None,
             "category_hint": self.category_hint,
             "reason": self.reason,
+            "withdrawal": self.withdrawal,
         }
 
 
@@ -98,6 +116,8 @@ def parse_sms(text: str, received_at: datetime | None = None) -> ParsedSms:
         return ParsedSms(False, reason="empty")
     if OTP_RE.search(raw):
         return ParsedSms(False, reason="otp")
+    if DECLINED_RE.search(raw):
+        return ParsedSms(False, reason="declined")
 
     amounts = [(m.start(), _decimal(m.group(1)), m.group(0)) for m in AMOUNT_RE.finditer(raw)]
     balance_at = BALANCE_RE.search(raw)
@@ -138,6 +158,7 @@ def parse_sms(text: str, received_at: datetime | None = None) -> ParsedSms:
     merchant = _merchant(raw, direction)
     occurred = _when(raw, received_at)
     hint = _category_hint(raw, merchant, direction)
+    withdrawal = looks_like_withdrawal(raw, merchant or "", direction)
     day = occurred.date().isoformat() if occurred else ""
     fingerprint = "|".join(
         [
@@ -159,7 +180,14 @@ def parse_sms(text: str, received_at: datetime | None = None) -> ParsedSms:
         balance=balance,
         category_hint=hint,
         fingerprint=fingerprint,
+        withdrawal=withdrawal,
     )
+
+
+def looks_like_withdrawal(text: str, merchant: str = "", direction: str = "expense") -> bool:
+    if direction != "expense":
+        return False
+    return bool(re.search(r"(?i)\b(withdrawn|withdrawal|\batm\b)\b", f"{merchant} {text}"))
 
 
 def _decimal(token: str) -> Decimal:
