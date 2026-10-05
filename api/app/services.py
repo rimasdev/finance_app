@@ -172,6 +172,45 @@ def account_map(db: Session, user_id: str) -> dict[str, Account]:
     return {a.id: a for a in db.query(Account).filter_by(user_id=user_id).all()}
 
 
+def repair_foreign_sms(db: Session) -> None:
+    """Charges already saved as the dollar figure get a rupee deduction."""
+    rows = (
+        db.query(Transaction)
+        .filter(Transaction.raw_sms.isnot(None), Transaction.fx_amount.is_(None))
+        .all()
+    )
+    changed = False
+    for txn in rows:
+        if (txn.currency or "LKR").upper() != "LKR":
+            continue
+        parsed = parse_sms(txn.raw_sms or "")
+        if not parsed.recognized or parsed.amount is None or (parsed.currency or "LKR") == "LKR":
+            continue
+        if abs(Decimal(str(txn.amount)) - parsed.amount) > Decimal("0.01"):
+            continue
+        settled, fx_amount, currency = lkr_settlement(parsed.amount, parsed.currency)
+        txn.currency = currency
+        txn.fx_amount = fx_amount
+        txn.amount = settled
+        changed = True
+    if changed:
+        db.commit()
+
+
+def lkr_settlement(amount: Decimal, currency: str | None) -> tuple[Decimal, Decimal | None, str]:
+    """Face value stays in its own currency. The account is charged in rupees."""
+    code = (currency or "LKR").strip().upper() or "LKR"
+    if code == "LKR":
+        return amount, None, "LKR"
+    try:
+        from app.routes import _lkr_rate
+
+        settled = (amount * _lkr_rate(code)).quantize(Decimal("0.01"))
+    except Exception:
+        settled = amount
+    return settled, amount, code
+
+
 def txn_json(txn: Transaction, accounts: dict[str, Account], categories: dict[str, Category]) -> dict:
     account = accounts.get(txn.account_id or "")
     other = accounts.get(txn.transfer_account_id or "")
@@ -188,6 +227,8 @@ def txn_json(txn: Transaction, accounts: dict[str, Account], categories: dict[st
         "category_color": category.color if category else "#9CA3AF",
         "direction": txn.direction,
         "amount": money(txn.amount),
+        "currency": (txn.currency or "LKR").upper(),
+        "fx_amount": money(txn.fx_amount) if txn.fx_amount is not None else None,
         "bank_charge": money(txn.bank_charge or 0),
         "merchant": txn.merchant,
         "note": txn.note or "",
@@ -198,6 +239,7 @@ def txn_json(txn: Transaction, accounts: dict[str, Account], categories: dict[st
         "status": txn.status,
         "hidden": bool(txn.hidden),
         "card_last4": txn.card_last4 or "",
+        "recurring_id": txn.recurring_id or "",
     }
 
 
@@ -639,12 +681,15 @@ def ingest_sms(
     local_when = parsed.occurred_at or received_at or datetime.now()
     category = _category_for_hint(db, user.id, parsed.category_hint, parsed.direction or "expense")
     status = "posted" if account else "needs_review"
+    settled, fx_amount, currency = lkr_settlement(parsed.amount or Decimal("0"), parsed.currency)
     txn = Transaction(
         user_id=user.id,
         account_id=account.id if account else None,
         category_id=category.id if category else None,
         direction=parsed.direction or "expense",
-        amount=parsed.amount,
+        amount=settled,
+        currency=currency,
+        fx_amount=fx_amount,
         merchant=parsed.merchant or "",
         occurred_at=to_utc(local_when, user.timezone),
         scope=account.purpose if account else "personal",

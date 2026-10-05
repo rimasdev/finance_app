@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 
 import '../banks.dart';
 import '../format.dart';
+import '../fx.dart';
 import '../icons.dart';
 import '../models.dart';
 import '../store.dart';
@@ -22,7 +23,12 @@ class TransactionFormScreen extends StatefulWidget {
 
 class _TransactionFormScreenState extends State<TransactionFormScreen> {
   final _amount = TextEditingController();
+  final _settled = TextEditingController();
   final _merchant = TextEditingController();
+  String _currency = 'LKR';
+  double? _fxAmount;
+  String _recurringId = '';
+  var _settledTouched = false;
   String _location = '';
   final _note = TextEditingController();
   final _tag = TextEditingController();
@@ -50,7 +56,15 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
         existing.direction == 'income' || existing.direction == 'transfer'
         ? existing.direction
         : 'expense';
-    _amount.text = groupedAmount(existing.amount);
+    _currency = existing.currency.isEmpty ? 'LKR' : existing.currency;
+    _fxAmount = existing.fxAmount;
+    _recurringId = existing.recurringId;
+    if (_currency != 'LKR' && existing.fxAmount != null) {
+      _amount.text = groupedAmount(existing.fxAmount!);
+      _settled.text = groupedAmount(existing.amount);
+    } else {
+      _amount.text = groupedAmount(existing.amount);
+    }
     _location = existing.merchant;
     _merchant.text = existing.merchant;
     _note.text = existing.note;
@@ -101,6 +115,7 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
   @override
   void dispose() {
     _amount.dispose();
+    _settled.dispose();
     _merchant.dispose();
     _note.dispose();
     _tag.dispose();
@@ -111,16 +126,23 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
   Future<void> _save() async {
     FocusManager.instance.primaryFocus?.unfocus();
     final store = context.read<FolioStore>();
-    final amount = double.tryParse(_amount.text.trim().replaceAll(',', ''));
+    final face = double.tryParse(_amount.text.trim().replaceAll(',', ''));
+    final foreign = _currency != 'LKR' && (_fxAmount != null || widget.existing != null);
+    final settled = double.tryParse(_settled.text.trim().replaceAll(',', ''));
+    final amount = foreign ? settled : face;
     final description = (_merchant.text.trim().isNotEmpty ? _merchant.text : _location).trim();
     final charge =
         double.tryParse(_charge.text.trim().replaceAll(',', '')) ?? 0;
-    if (_accountId == null || amount == null || amount <= 0) {
+    if (_accountId == null || face == null || face <= 0) {
       showError(context, Exception('Add an amount and an account'));
       return;
     }
-    if (_direction != 'transfer' && description.isEmpty) {
-      showError(context, Exception('Add a location'));
+    if (foreign && (amount == null || amount <= 0)) {
+      showError(context, Exception('Add the rupee amount taken from the account'));
+      return;
+    }
+    if (_repeatKind != null && description.isEmpty) {
+      showError(context, Exception('Add a location for this repeat'));
       return;
     }
     if (_direction == 'transfer' &&
@@ -136,6 +158,7 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
       'account_id': _accountId,
       'direction': _direction,
       'amount': amount,
+      if (foreign) 'fx_amount': face,
       'merchant': _direction == 'transfer' && description.isEmpty
           ? 'Transfer'
           : description,
@@ -393,6 +416,48 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
       _installments = count;
       _provider = provider;
     });
+  }
+
+  Future<void> _pickSubscription(FolioStore store) async {
+    final existing = widget.existing;
+    if (existing == null) return;
+    final plans = store.recurring.where((item) => item.active).toList();
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: FolioColors.bg,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+          children: [
+            const Text('Subscription', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 8),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Not linked'),
+              onTap: () => Navigator.pop(context, ''),
+            ),
+            for (final item in plans)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(item.name),
+                subtitle: Text(item.currency == 'LKR' ? money(item.amount) : foreignAmount(item.currency, item.amount)),
+                onTap: () => Navigator.pop(context, item.id),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    try {
+      await store.linkTransactionRecurring(existing.id, picked.isEmpty ? null : picked);
+      if (mounted) setState(() => _recurringId = picked);
+    } catch (error) {
+      if (mounted) showError(context, error);
+    }
   }
 
   Future<void> _pickAccount(FolioStore store, {required bool destination}) async {
@@ -728,6 +793,7 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
       _business = store.accounts.first.isBusiness;
     }
     final editing = widget.existing != null;
+    final foreign = _currency != 'LKR' && _fxAmount != null;
     final kind = _direction == 'income' ? 'income' : 'expense';
     final categoryBudget = _budgetFor(store, _categoryId);
     final typedAmount = double.tryParse(_amount.text.trim().replaceAll(',', '')) ?? 0;
@@ -769,13 +835,20 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
           TextField(
             controller: _amount,
             autofocus: !editing,
-            onChanged: (_) => setState(() {}),
+            onChanged: (value) {
+              if (foreign && !_settledTouched) {
+                final face = double.tryParse(value.replaceAll(',', ''));
+                final rate = store.rates?.lkrPer(_currency);
+                if (face != null && rate != null) _settled.text = groupedAmount(face * rate);
+              }
+              setState(() {});
+            },
             textAlign: TextAlign.center,
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
             inputFormatters: const [ThousandsInputFormatter()],
             style: const TextStyle(fontSize: 44, fontWeight: FontWeight.w700),
             decoration: InputDecoration(
-              hintText: 'Rs. 0',
+              hintText: foreign ? '$_currency 0' : 'Rs. 0',
               hintStyle: const TextStyle(fontSize: 44, fontWeight: FontWeight.w700, color: FolioColors.text),
               filled: true,
               fillColor: FolioColors.card,
@@ -785,6 +858,25 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
               focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(18), borderSide: BorderSide.none),
             ),
           ),
+          if (foreign) ...[
+            const SizedBox(height: 6),
+            Text(
+              _currency,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: FolioColors.muted, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _settled,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              inputFormatters: const [ThousandsInputFormatter()],
+              onChanged: (_) => _settledTouched = true,
+              decoration: const InputDecoration(
+                labelText: 'Deducted in rupees',
+                hintText: 'Rs. 0',
+              ),
+            ),
+          ],
           const SizedBox(height: 8),
           TextField(
             controller: _merchant,
@@ -792,7 +884,7 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
             textAlign: TextAlign.center,
             textCapitalization: TextCapitalization.words,
             decoration: InputDecoration(
-              hintText: _direction == 'transfer' ? 'Description, optional' : 'Location',
+              hintText: _direction == 'transfer' ? 'Description, optional' : 'Location, optional',
               fillColor: Colors.transparent,
               contentPadding: EdgeInsets.zero,
             ),
@@ -829,6 +921,16 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
           else
             _PayList(
               children: [
+                if (editing && _direction == 'expense')
+                  _PayRow(
+                    tooltip: 'Subscription',
+                    icon: Icons.event_repeat_rounded,
+                    color: const Color(0xFF8ED4B0),
+                    label: 'Subscription',
+                    value: store.recurring.where((item) => item.id == _recurringId).firstOrNull?.name ?? 'Not linked',
+                    filled: _recurringId.isNotEmpty,
+                    onTap: () => _pickSubscription(store),
+                  ),
                 if (_direction != 'transfer')
                   _PayRow(
                     tooltip: 'Category',
@@ -1571,7 +1673,7 @@ class _ReviewCardState extends State<_ReviewCard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            widget.txn.merchant,
+            widget.txn.title,
             style: const TextStyle(fontWeight: FontWeight.w700),
           ),
           Text(
@@ -1631,7 +1733,7 @@ class _ReviewCardState extends State<_ReviewCard> {
 
   String moneyLabel(TxnModel txn) {
     final sign = txn.direction == 'income' ? 'In' : 'Out';
-    return '$sign · Rs. ${txn.amount.toStringAsFixed(2)}';
+    return '$sign · ${postedAmount(amount: txn.amount, currency: txn.currency, fxAmount: txn.fxAmount)}';
   }
 }
 

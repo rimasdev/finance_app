@@ -117,7 +117,9 @@ class _RecurringCard extends StatelessWidget {
                 ),
               ),
               Text(
-                rupeesFor(item.amount, item.currency, store.rates),
+                item.currency == 'LKR'
+                    ? money(item.amount)
+                    : foreignAmount(item.currency, item.amount),
                 style: const TextStyle(fontWeight: FontWeight.w700),
               ),
             ],
@@ -126,7 +128,7 @@ class _RecurringCard extends StatelessWidget {
           Text(
             [
               if (item.provider.isNotEmpty) item.provider,
-              if (item.currency != 'LKR') foreignAmount(item.currency, item.amount),
+              if (item.currency != 'LKR') rupeesFor(item.amount, item.currency, store.rates),
               item.accountName,
               item.interval,
               if (item.active) 'Next ${item.nextOn}' else 'Finished',

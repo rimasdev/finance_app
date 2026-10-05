@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'api.dart';
 import 'format.dart';
+import 'fx.dart';
 import 'icons.dart';
 import 'models.dart';
 import 'theme.dart';
@@ -270,7 +271,7 @@ class TxnTile extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  txn.merchant,
+                  txn.title,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontWeight: FontWeight.w600),
@@ -293,12 +294,17 @@ class TxnTile extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               Text(
-                money(txn.amount),
+                postedAmount(amount: txn.amount, currency: txn.currency, fxAmount: txn.fxAmount),
                 style: TextStyle(
                   color: amountColor,
                   fontWeight: FontWeight.w700,
                 ),
               ),
+              if (txn.currency != 'LKR' && txn.fxAmount != null)
+                Text(
+                  money(txn.amount),
+                  style: const TextStyle(color: FolioColors.muted, fontSize: 11),
+                ),
               Text(
                 clock(txn.occurredAt),
                 style: const TextStyle(color: FolioColors.muted, fontSize: 11),

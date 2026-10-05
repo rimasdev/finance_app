@@ -379,6 +379,11 @@ class FolioStore extends ChangeNotifier {
     await refresh();
   }
 
+  Future<void> linkTransactionRecurring(String id, String? recurringId) async {
+    await api.post('/transactions/$id/recurring', {'recurring_id': recurringId});
+    await refresh();
+  }
+
   Future<void> deleteTransaction(String id) async {
     await api.delete('/transactions/$id');
     await refresh();

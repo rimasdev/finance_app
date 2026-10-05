@@ -401,6 +401,18 @@ def test_account_order_and_transfer_without_description(client):
     )
     assert moved.status_code == 200, moved.text
     assert moved.json()["merchant"] == "Transfer"
+    spent = client.post(
+        "/transactions",
+        headers=headers,
+        json={
+            "account_id": second["id"],
+            "direction": "expense",
+            "amount": 5,
+            "merchant": "",
+        },
+    )
+    assert spent.status_code == 200, spent.text
+    assert spent.json()["merchant"] == ""
 
 
 def test_transfer_fee_preferred_account_and_hidden(client):
@@ -542,6 +554,44 @@ def test_installment_keeps_the_shop_and_posts_foreign_amounts_in_rupees(client, 
     assert posted["merchant"] == "Carnage"
     assert posted["amount"] == 3000
     assert posted["note"] == "USD 10.00"
+
+
+def test_a_dollar_purchase_shows_dollars_and_deducts_rupees(client, monkeypatch):
+    monkeypatch.setattr("app.routes._lkr_rate", lambda currency: Decimal("330"))
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    bank = client.post(
+        "/accounts",
+        headers=headers,
+        json={"name": "Flash", "type": "bank", "opening_balance": 5000, "last4": "8028", "sms_sender": "COMBANK"},
+    ).json()
+    posted = client.post(
+        "/sms/ingest",
+        headers=headers,
+        json={
+            "body": (
+                "Dear Cardholder, Purchase at APPLE.COM/BILL SINGAPORE SG for USD 2.99 "
+                "on 05/10/26 03:41 AM has been authorised on your debit card ending #8028."
+            ),
+            "sender": "COMBANK",
+        },
+    )
+    assert posted.status_code == 200, posted.text
+    txn = posted.json()["transaction"]
+    assert txn["currency"] == "USD"
+    assert txn["fx_amount"] == 2.99
+    assert txn["amount"] == 986.7
+    balances = {row["name"]: row["balance"] for row in client.get("/accounts", headers=headers).json()}
+    assert balances["Flash"] == 4013.3
+    edited = client.patch(
+        f"/transactions/{txn['id']}",
+        headers=headers,
+        json={"amount": 1000},
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["amount"] == 1000
+    assert edited.json()["currency"] == "USD"
+    assert edited.json()["fx_amount"] == 2.99
 
 
 def test_a_recurring_plan_can_be_edited(client):
@@ -769,3 +819,120 @@ def test_category_budget_includes_subcategories(client):
     groceries_budget = next(row for row in budgets if row["category_id"] == groceries["id"])
     assert groceries_budget["spent"] == 250
     assert groceries_budget["remaining"] == 9750
+
+
+def test_deleting_a_recorded_payment_brings_the_subscription_back(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    cash = client.post("/accounts", headers=headers, json={"name": "Cash", "type": "cash", "opening_balance": 5000}).json()
+    plan = client.post(
+        "/recurring",
+        headers=headers,
+        json={
+            "kind": "subscription",
+            "name": "iCloud+",
+            "amount": 2.99,
+            "currency": "USD",
+            "account_id": cash["id"],
+            "interval": "monthly",
+            "next_on": "2026-10-04",
+        },
+    ).json()
+    paid = client.post(f"/recurring/{plan['id']}/pay", headers=headers)
+    assert paid.status_code == 200, paid.text
+    assert paid.json()["next_on"] == "2026-11-04"
+    txns = client.get("/transactions", headers=headers).json()
+    assert len(txns) == 1
+    assert txns[0]["recurring_id"] == plan["id"]
+    deleted = client.delete(f"/transactions/{txns[0]['id']}", headers=headers)
+    assert deleted.status_code == 200, deleted.text
+    rows = client.get("/recurring", headers=headers).json()
+    assert rows[0]["next_on"] == "2026-10-04"
+    assert rows[0]["active"] is True
+    assert client.get("/transactions", headers=headers).json() == []
+
+
+def test_an_apple_text_settles_icloud_and_deleting_it_brings_the_due_date_back(client, monkeypatch):
+    monkeypatch.setattr("app.routes._lkr_rate", lambda currency: Decimal("330"))
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    bank = client.post(
+        "/accounts",
+        headers=headers,
+        json={"name": "Flash", "type": "bank", "opening_balance": 5000, "last4": "8028", "sms_sender": "COMBANK"},
+    ).json()
+    plan = client.post(
+        "/recurring",
+        headers=headers,
+        json={
+            "kind": "subscription",
+            "name": "iCloud+",
+            "amount": 2.99,
+            "currency": "USD",
+            "account_id": bank["id"],
+            "interval": "monthly",
+            "next_on": "2026-10-04",
+        },
+    ).json()
+    posted = client.post(
+        "/sms/ingest",
+        headers=headers,
+        json={
+            "body": (
+                "Dear Cardholder, Purchase at APPLE.COM/BILL SINGAPORE SG for USD 2.99 "
+                "on 05/10/26 03:41 AM has been authorised on your debit card ending #8028."
+            ),
+            "sender": "COMBANK",
+        },
+    )
+    assert posted.status_code == 200, posted.text
+    txn = posted.json()["transaction"]
+    assert txn["recurring_id"] == plan["id"]
+    rows = client.get("/recurring", headers=headers).json()
+    assert rows[0]["next_on"] == "2026-11-04"
+    client.delete(f"/transactions/{txn['id']}", headers=headers)
+    restored = client.get("/recurring", headers=headers).json()
+    assert restored[0]["next_on"] == "2026-10-04"
+
+
+def test_linking_the_apple_text_counts_as_the_icloud_payment(client, monkeypatch):
+    monkeypatch.setattr("app.routes._lkr_rate", lambda currency: Decimal("330"))
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    bank = client.post(
+        "/accounts",
+        headers=headers,
+        json={"name": "Flash", "type": "bank", "opening_balance": 5000, "last4": "8028", "sms_sender": "COMBANK"},
+    ).json()
+    posted = client.post(
+        "/sms/ingest",
+        headers=headers,
+        json={
+            "body": (
+                "Dear Cardholder, Purchase at APPLE.COM/BILL SINGAPORE SG for USD 2.99 "
+                "on 05/10/26 03:41 AM has been authorised on your debit card ending #8028."
+            ),
+            "sender": "COMBANK",
+        },
+    ).json()["transaction"]
+    plan = client.post(
+        "/recurring",
+        headers=headers,
+        json={
+            "kind": "subscription",
+            "name": "iCloud+",
+            "amount": 2.99,
+            "currency": "USD",
+            "account_id": bank["id"],
+            "interval": "monthly",
+            "next_on": "2026-10-04",
+        },
+    ).json()
+    linked = client.post(f"/transactions/{posted['id']}/recurring", headers=headers, json={"recurring_id": plan["id"]})
+    assert linked.status_code == 200, linked.text
+    assert linked.json()["recurring_id"] == plan["id"]
+    rows = client.get("/recurring", headers=headers).json()
+    assert rows[0]["next_on"] == "2026-11-04"
+    balances = {row["name"]: row["balance"] for row in client.get("/accounts", headers=headers).json()}
+    assert balances["Flash"] == 4013.3
+    assert len(client.get("/transactions", headers=headers).json()) == 1

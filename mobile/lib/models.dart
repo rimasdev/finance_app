@@ -126,6 +126,8 @@ class TxnModel {
     required this.categoryColor,
     required this.direction,
     required this.amount,
+    this.currency = 'LKR',
+    this.fxAmount,
     this.bankCharge = 0,
     required this.merchant,
     required this.note,
@@ -136,6 +138,7 @@ class TxnModel {
     required this.status,
     this.hidden = false,
     this.cardLast4 = '',
+    this.recurringId = '',
   });
 
   final String id;
@@ -149,6 +152,8 @@ class TxnModel {
   final String categoryColor;
   final String direction;
   final double amount;
+  final String currency;
+  final double? fxAmount;
   final double bankCharge;
   final String merchant;
   final String note;
@@ -159,8 +164,17 @@ class TxnModel {
   final String status;
   final bool hidden;
   final String cardLast4;
+  final String recurringId;
 
   bool get isBusiness => scope == 'business';
+
+  String get title {
+    if (merchant.trim().isNotEmpty) return merchant;
+    if (categoryName.trim().isNotEmpty) return categoryName;
+    if (direction == 'income') return 'Income';
+    if (direction == 'transfer') return 'Transfer';
+    return 'Expense';
+  }
 
   factory TxnModel.fromJson(Map<String, dynamic> json) => TxnModel(
     id: json['id'] as String,
@@ -174,6 +188,8 @@ class TxnModel {
     categoryColor: json['category_color'] as String? ?? '#9CA3AF',
     direction: json['direction'] as String,
     amount: (json['amount'] as num).toDouble(),
+    currency: (json['currency'] as String? ?? 'LKR').toUpperCase(),
+    fxAmount: (json['fx_amount'] as num?)?.toDouble(),
     bankCharge: (json['bank_charge'] as num?)?.toDouble() ?? 0,
     merchant: json['merchant'] as String? ?? '',
     note: json['note'] as String? ?? '',
@@ -187,6 +203,7 @@ class TxnModel {
     status: json['status'] as String? ?? 'posted',
     hidden: json['hidden'] as bool? ?? false,
     cardLast4: json['card_last4'] as String? ?? '',
+    recurringId: json['recurring_id'] as String? ?? '',
   );
 }
 

@@ -223,7 +223,7 @@ class _TimelineScreenState extends State<TimelineScreen> {
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 ListTile(
-                                  title: Text(txn.merchant),
+                                  title: Text(txn.title),
                                   subtitle: Text(
                                     txn.note.isEmpty
                                         ? txn.categoryName

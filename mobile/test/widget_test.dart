@@ -39,6 +39,8 @@ void main() {
     expect(rupeesFor(1, 'EUR', rates), money(600));
     expect(rupeesFor(10, 'LKR', rates), money(10));
     expect(rupeesFor(10, 'USD', null), 'USD 10.00');
+    expect(postedAmount(amount: 986.7, currency: 'USD', fxAmount: 2.99), 'USD 2.99');
+    expect(postedAmount(amount: 10, currency: 'LKR'), money(10));
     final saved = RecurringModel.fromJson({
       'id': '1',
       'kind': 'installment',

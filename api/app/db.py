@@ -85,6 +85,12 @@ def _ensure_user_columns() -> None:
             statements.append("ALTER TABLE transactions ADD COLUMN card_last4 VARCHAR(4) DEFAULT ''")
         if "tags" not in txn_columns:
             statements.append("ALTER TABLE transactions ADD COLUMN tags VARCHAR(200) DEFAULT ''")
+        if "currency" not in txn_columns:
+            statements.append("ALTER TABLE transactions ADD COLUMN currency VARCHAR(8) DEFAULT 'LKR'")
+        if "fx_amount" not in txn_columns:
+            statements.append("ALTER TABLE transactions ADD COLUMN fx_amount NUMERIC(14, 2)")
+        if "recurring_id" not in txn_columns:
+            statements.append("ALTER TABLE transactions ADD COLUMN recurring_id VARCHAR(36)")
     if "categories" in inspector.get_table_names():
         category_columns = {column["name"] for column in inspector.get_columns("categories")}
         if "parent_id" not in category_columns:

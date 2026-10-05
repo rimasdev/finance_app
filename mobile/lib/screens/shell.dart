@@ -393,7 +393,6 @@ class _UpcomingRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final rates = context.watch<FolioStore>().rates;
     final mark = item.provider.isNotEmpty ? item.provider : item.name;
     return InkWell(
       onTap: () => Navigator.push(
@@ -409,7 +408,7 @@ class _UpcomingRow extends StatelessWidget {
             const SizedBox(width: 10),
             Expanded(
               child: Text(
-                '${item.name}  →  ${rupeesFor(item.amount, item.currency, rates)}',
+                '${item.name}  →  ${item.currency == 'LKR' ? money(item.amount) : foreignAmount(item.currency, item.amount)}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(fontWeight: FontWeight.w600),

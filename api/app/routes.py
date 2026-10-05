@@ -30,6 +30,7 @@ from app.services import (
     match_account,
     remember_card,
     loan_json,
+    lkr_settlement,
     seed_categories,
     timeline,
     txn_json,
@@ -230,6 +231,7 @@ class TxnPatch(BaseModel):
     tags: str | None = None
     scope: str | None = None
     amount: Decimal | None = Field(default=None, gt=0)
+    fx_amount: Decimal | None = Field(default=None, gt=0)
     bank_charge: Decimal | None = Field(default=None, ge=0)
     hidden: bool | None = None
     occurred_at: datetime | None = None
@@ -740,11 +742,8 @@ def create_transaction(body: TxnIn, user: User = Depends(current_user), db: Sess
             raise HTTPException(400, "Pick a different account to transfer to")
         other = _owned_account(db, user, body.transfer_account_id)
     merchant = body.merchant.strip()
-    if body.direction == "transfer":
-        if not merchant:
-            merchant = "Transfer"
-    elif not merchant:
-        raise HTTPException(400, "Add a name for this transaction")
+    if body.direction == "transfer" and not merchant:
+        merchant = "Transfer"
     charge = body.bank_charge if body.direction == "transfer" else Decimal("0")
     scope = body.scope or account.purpose
     if scope not in PURPOSES:
@@ -811,10 +810,11 @@ def patch_transaction(
         if "category_id" in data:
             category = _owned_category(db, user, data["category_id"])
             txn.category_id = category.id if category else None
-    if "merchant" in data and data["merchant"]:
-        txn.merchant = data["merchant"].strip()
-    elif txn.direction == "transfer" and not (txn.merchant or "").strip():
-        txn.merchant = "Transfer"
+    if "merchant" in data:
+        merchant = (data["merchant"] or "").strip()
+        if txn.direction == "transfer" and not merchant:
+            merchant = "Transfer"
+        txn.merchant = merchant
     if "note" in data:
         txn.note = (data["note"] or "").strip()
     if "tags" in data:
@@ -823,6 +823,8 @@ def patch_transaction(
         txn.scope = data["scope"]
     if "amount" in data and data["amount"] is not None:
         txn.amount = data["amount"]
+    if "fx_amount" in data and data["fx_amount"] is not None:
+        txn.fx_amount = data["fx_amount"]
     if "hidden" in data and data["hidden"] is not None:
         txn.hidden = bool(data["hidden"])
     if "occurred_at" in data and data["occurred_at"] is not None:
@@ -880,9 +882,52 @@ def delete_transaction(txn_id: str, user: User = Depends(current_user), db: Sess
         raise HTTPException(404, "Transaction not found")
     if txn.loan_id:
         raise HTTPException(400, "This entry belongs to a loan. Record a repayment, or delete the loan.")
+    if txn.recurring_id:
+        plan = db.get(Recurring, txn.recurring_id)
+        when = txn.occurred_at.date() if isinstance(txn.occurred_at, datetime) else txn.occurred_at
+        if plan is not None and plan.user_id == user.id and (txn.source == "recurring" or _paid_this_cycle(plan, when)):
+            _unmark_paid(plan)
     db.delete(txn)
     db.commit()
     return {"deleted": True}
+
+
+class RecurringLinkIn(BaseModel):
+    recurring_id: str | None = None
+
+
+@router.post("/transactions/{txn_id}/recurring")
+def link_transaction_recurring(
+    txn_id: str,
+    body: RecurringLinkIn,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    txn = db.get(Transaction, txn_id)
+    if txn is None or txn.user_id != user.id:
+        raise HTTPException(404, "Transaction not found")
+    when = txn.occurred_at.date() if isinstance(txn.occurred_at, datetime) else txn.occurred_at
+    if txn.recurring_id:
+        previous = db.get(Recurring, txn.recurring_id)
+        if previous is not None and previous.user_id == user.id and _paid_this_cycle(previous, when):
+            _unmark_paid(previous)
+        txn.recurring_id = None
+    if body.recurring_id:
+        plan = db.get(Recurring, body.recurring_id)
+        if plan is None or plan.user_id != user.id:
+            raise HTTPException(404, "Recurring item not found")
+        if not plan.active:
+            raise HTTPException(400, "This series is finished")
+        txn.recurring_id = plan.id
+        if (
+            plan.next_on is not None
+            and when is not None
+            and plan.next_on - timedelta(days=5) <= when <= plan.next_on + timedelta(days=20)
+        ):
+            _mark_paid(plan)
+    db.commit()
+    db.refresh(txn)
+    return txn_json(txn, account_map(db, user.id), category_map(db, user.id))
 
 
 @router.post("/sms/ingest")
@@ -894,6 +939,8 @@ def sms_ingest(body: SmsIn, user: User = Depends(current_user), db: Session = De
         txn = db.get(Transaction, txn_id)
         if txn is not None and _settle_matching_recurring(db, user, txn):
             db.commit()
+            db.refresh(txn)
+            result["transaction"] = txn_json(txn, account_map(db, user.id), category_map(db, user.id))
     return result
 
 
@@ -1067,6 +1114,24 @@ def _compact_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (value or "").lower())
 
 
+_NAME_ALIASES = {
+    "icloud": ("apple", "applecom", "applecombill"),
+    "apple": ("icloud", "applecom", "applecombill"),
+    "spotify": ("spotifyab",),
+}
+
+
+def _name_keys(value: str) -> list[str]:
+    key = _compact_name(value)
+    if len(key) < 3:
+        return []
+    keys = [key]
+    for alias in _NAME_ALIASES.get(key, ()):
+        if alias not in keys:
+            keys.append(alias)
+    return keys
+
+
 def _expected_lkr(row: Recurring) -> Decimal | None:
     amount = Decimal(str(row.amount))
     currency = (row.currency or "LKR").upper()
@@ -1086,9 +1151,35 @@ def _mark_paid(row: Recurring) -> None:
     row.next_on = _advance(row.next_on, row.interval)
 
 
+def _paid_this_cycle(row: Recurring, when: date | None) -> bool:
+    if when is None or row.next_on is None:
+        return False
+    finished = (
+        row.kind == "installment"
+        and not row.active
+        and row.installments_total
+        and (row.installments_done or 0) >= row.installments_total
+    )
+    due = row.next_on if finished else _rewind(row.next_on, row.interval)
+    return due - timedelta(days=5) <= when <= due + timedelta(days=20)
+
+
+def _unmark_paid(row: Recurring) -> None:
+    finished = (
+        row.kind == "installment"
+        and not row.active
+        and row.installments_total
+        and (row.installments_done or 0) >= row.installments_total
+    )
+    row.installments_done = max(0, (row.installments_done or 0) - 1)
+    row.active = True
+    if not finished and row.next_on is not None:
+        row.next_on = _rewind(row.next_on, row.interval)
+
+
 def _settle_matching_recurring(db: Session, user: User, txn: Transaction) -> bool:
     """A bank message or a manual expense pays the matching plan without a second debit."""
-    if txn.status != "posted" or txn.direction != "expense" or txn.source == "recurring":
+    if txn.recurring_id or txn.status != "posted" or txn.direction != "expense" or txn.source == "recurring":
         return False
     if not txn.account_id or txn.occurred_at is None:
         return False
@@ -1105,8 +1196,8 @@ def _settle_matching_recurring(db: Session, user: User, txn: Transaction) -> boo
             continue
         if when < row.next_on - timedelta(days=5) or when > row.next_on + timedelta(days=20):
             continue
-        keys = [_compact_name(row.name), _compact_name(row.provider)]
-        if not any(len(key) >= 3 and key in hay for key in keys):
+        keys = _name_keys(row.name) + _name_keys(row.provider)
+        if not any(key in hay for key in keys):
             continue
         expected = _expected_lkr(row)
         if expected is None or expected <= 0:
@@ -1120,8 +1211,67 @@ def _settle_matching_recurring(db: Session, user: User, txn: Transaction) -> boo
             best_gap = gap
     if best is None:
         return False
+    txn.recurring_id = best.id
     _mark_paid(best)
     return True
+
+
+def _rewind(day: date, interval: str) -> date:
+    if interval == "weekly":
+        return day - timedelta(days=7)
+    if interval == "yearly":
+        try:
+            return day.replace(year=day.year - 1)
+        except ValueError:
+            return day.replace(year=day.year - 1, month=2, day=28)
+    month = day.month - 1
+    year = day.year - (1 if month == 0 else 0)
+    month = 12 if month == 0 else month
+    last = date(year + (1 if month == 12 else 0), 1 if month == 12 else month + 1, 1) - timedelta(days=1)
+    return date(year, month, min(day.day, last.day))
+
+
+def _amounts_close(paid: Decimal, expected: Decimal) -> bool:
+    gap = abs(paid - expected)
+    tolerance = max(Decimal("25"), (expected * Decimal("0.03")).quantize(Decimal("0.01")))
+    return gap <= tolerance
+
+
+def _unlinked_payment(db: Session, user: User, row: Recurring) -> Transaction | None:
+    """A bank message already on the account can count as this payment."""
+    if row.next_on is None or not row.account_id:
+        return None
+    expected = _expected_lkr(row)
+    if expected is None:
+        return None
+    start = datetime.combine(row.next_on - timedelta(days=5), datetime.min.time())
+    end = datetime.combine(row.next_on + timedelta(days=20), datetime.max.time())
+    candidates = (
+        db.query(Transaction)
+        .filter(
+            Transaction.user_id == user.id,
+            Transaction.account_id == row.account_id,
+            Transaction.direction == "expense",
+            Transaction.status == "posted",
+            Transaction.recurring_id.is_(None),
+            Transaction.occurred_at >= start,
+            Transaction.occurred_at <= end,
+        )
+        .all()
+    )
+    best = None
+    best_gap = None
+    for txn in candidates:
+        if txn.source == "recurring":
+            continue
+        paid = Decimal(str(txn.amount))
+        if not _amounts_close(paid, expected):
+            continue
+        gap = abs(paid - expected)
+        if best is None or best_gap is None or gap < best_gap:
+            best = txn
+            best_gap = gap
+    return best
 
 
 def _advance(day: date, interval: str) -> date:
@@ -1288,26 +1438,35 @@ def pay_recurring(recurring_id: str, user: User = Depends(current_user), db: Ses
     if not row.account_id:
         raise HTTPException(400, "Choose an account")
     account = _owned_account(db, user, row.account_id)
+    existing = _unlinked_payment(db, user, row)
+    if existing is not None:
+        existing.recurring_id = row.id
+        _mark_paid(row)
+        db.commit()
+        db.refresh(row)
+        return _recurring_json(row, account_map(db, user.id))
     currency = (row.currency or "LKR").upper()
-    amount = Decimal(str(row.amount))
-    if currency != "LKR":
-        amount = (amount * _lkr_rate(currency)).quantize(Decimal("0.01"))
+    face = Decimal(str(row.amount))
+    settled, fx_amount, currency = lkr_settlement(face, currency)
     note = "" if (row.note or "").startswith("fx:") else (row.note or "")
     if currency != "LKR":
-        shown = format(Decimal(str(row.amount)).quantize(Decimal("0.01")), "f")
+        shown = format(face.quantize(Decimal("0.01")), "f")
         original = f"{currency} {shown}"
         note = original if not note else f"{note} · {original}"
     txn = Transaction(
         user_id=user.id,
         account_id=account.id,
         direction="expense",
-        amount=amount,
+        amount=settled,
+        currency=currency,
+        fx_amount=fx_amount,
         merchant=row.name,
         note=note,
         occurred_at=datetime.combine(row.next_on, datetime.min.time()),
         scope=account.purpose,
         source="recurring",
         status="posted",
+        recurring_id=row.id,
     )
     db.add(txn)
     _mark_paid(row)

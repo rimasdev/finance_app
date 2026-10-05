@@ -87,7 +87,16 @@ String foreignAmount(String currency, num value) {
   return negative ? '$currency -$text' : '$currency $text';
 }
 
-/// Home amounts are always rupees. A foreign amount uses today's rate.
+/// The figure people read: dollars stay dollars. Rupees stay rupees.
+String postedAmount({required double amount, String currency = 'LKR', double? fxAmount}) {
+  final code = currency.toUpperCase();
+  if (code.isNotEmpty && code != 'LKR' && fxAmount != null) {
+    return foreignAmount(code, fxAmount);
+  }
+  return money(amount);
+}
+
+/// What actually leaves the account, in rupees.
 String rupeesFor(double amount, String currency, ExchangeRates? rates) {
   final code = currency.toUpperCase();
   if (code.isEmpty || code == 'LKR') return money(amount);
