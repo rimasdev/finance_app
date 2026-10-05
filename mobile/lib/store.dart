@@ -424,9 +424,47 @@ class FolioStore extends ChangeNotifier {
     await refresh();
   }
 
+  Future<void> reorderCategories(String kind, List<CategoryModel> ordered) async {
+    final previous = categories;
+    final others = [for (final category in categories) if (category.kind != kind) category];
+    categories = [...others, ...ordered];
+    notifyListeners();
+    try {
+      await api.post('/categories/order', {
+        'kind': kind,
+        'items': [
+          for (final category in ordered) {'id': category.id, 'parent_id': category.parentId},
+        ],
+      });
+      await refresh();
+    } catch (error) {
+      categories = previous;
+      notifyListeners();
+      rethrow;
+    }
+  }
+
   Future<void> deleteCategory(String id) async {
-    await api.delete('/categories/$id');
-    await refresh();
+    final previous = categories;
+    final drop = <String>{id};
+    var grew = true;
+    while (grew) {
+      grew = false;
+      for (final category in previous) {
+        final parentId = category.parentId;
+        if (parentId != null && drop.contains(parentId) && drop.add(category.id)) grew = true;
+      }
+    }
+    categories = [for (final category in categories) if (!drop.contains(category.id)) category];
+    notifyListeners();
+    try {
+      await api.delete('/categories/$id');
+      await refresh();
+    } catch (error) {
+      categories = previous;
+      notifyListeners();
+      rethrow;
+    }
   }
 
   Future<void> createTransaction(Map<String, dynamic> body) async {

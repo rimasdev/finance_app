@@ -711,6 +711,7 @@ def create_category(body: CategoryIn, user: User = Depends(current_user), db: Se
         if parent.parent_id:
             raise HTTPException(400, "Add this under the main category")
         parent_id = parent.id
+    last = db.query(func.max(Category.sort_order)).filter_by(user_id=user.id, kind=body.kind).scalar()
     row = Category(
         user_id=user.id,
         name=body.name,
@@ -718,6 +719,7 @@ def create_category(body: CategoryIn, user: User = Depends(current_user), db: Se
         icon=body.icon,
         color=body.color,
         parent_id=parent_id,
+        sort_order=int(last or 0) + 1,
     )
     db.add(row)
     db.commit()
@@ -731,6 +733,41 @@ def create_category(body: CategoryIn, user: User = Depends(current_user), db: Se
         "parent_id": row.parent_id,
         "transaction_count": 0,
     }
+
+
+class CategoryPlacement(BaseModel):
+    id: str
+    parent_id: str | None = None
+
+
+class CategoryOrderIn(BaseModel):
+    kind: str
+    items: list[CategoryPlacement]
+
+    @field_validator("kind")
+    @classmethod
+    def clean_order_kind(cls, value: str) -> str:
+        if value not in {"expense", "income"}:
+            raise ValueError("Kind must be expense or income")
+        return value
+
+
+@router.post("/categories/order")
+def order_categories(body: CategoryOrderIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    rows = db.query(Category).filter_by(user_id=user.id, kind=body.kind).all()
+    known = {row.id: row for row in rows}
+    if {item.id for item in body.items} != set(known):
+        raise HTTPException(400, "Include every category")
+    parents = {item.id for item in body.items if not item.parent_id}
+    for item in body.items:
+        if item.parent_id and (item.parent_id not in parents or item.parent_id == item.id):
+            raise HTTPException(400, "Add this under the main category")
+    for index, item in enumerate(body.items):
+        row = known[item.id]
+        row.parent_id = item.parent_id
+        row.sort_order = index
+    db.commit()
+    return {"ok": True}
 
 
 class CategoryPatch(BaseModel):
@@ -771,12 +808,10 @@ def update_category(
     }
 
 
-@router.delete("/categories/{category_id}")
-def delete_category(category_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    row = _owned_category(db, user, category_id)
-    children = db.query(Category).filter_by(user_id=user.id, parent_id=row.id).count()
-    if children:
-        raise HTTPException(400, "Remove its subcategories first")
+def _purge_category(db: Session, user: User, row: Category) -> None:
+    children = db.query(Category).filter_by(user_id=user.id, parent_id=row.id).all()
+    for child in children:
+        _purge_category(db, user, child)
     db.query(Transaction).filter_by(user_id=user.id, category_id=row.id).update(
         {"category_id": None},
         synchronize_session=False,
@@ -787,6 +822,12 @@ def delete_category(category_id: str, user: User = Depends(current_user), db: Se
     )
     remember_skipped_category(user, row.kind, row.name)
     db.delete(row)
+
+
+@router.delete("/categories/{category_id}")
+def delete_category(category_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    row = _owned_category(db, user, category_id)
+    _purge_category(db, user, row)
     db.commit()
     return {"deleted": True}
 

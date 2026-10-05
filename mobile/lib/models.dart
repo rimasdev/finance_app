@@ -111,6 +111,18 @@ class CategoryModel {
     parentId: json['parent_id'] as String?,
     transactionCount: json['transaction_count'] as int? ?? 0,
   );
+
+  CategoryModel copyWith({String? parentId, bool clearParent = false}) {
+    return CategoryModel(
+      id: id,
+      name: name,
+      kind: kind,
+      icon: icon,
+      color: color,
+      parentId: clearParent ? null : (parentId ?? this.parentId),
+      transactionCount: transactionCount,
+    );
+  }
 }
 
 class PayeeModel {

@@ -862,6 +862,31 @@ def test_category_rename_subcategory_and_delete_stick(client):
     assert "Snacks" not in names
     clash = client.patch(f"/categories/{vegetables['id']}", headers=headers, json={"name": "Spices"})
     assert clash.status_code == 400
+    groceries_id = groceries["id"]
+    removed_group = client.delete(f"/categories/{groceries_id}", headers=headers)
+    assert removed_group.status_code == 200, removed_group.text
+    after_group = client.get("/categories", headers=headers).json()
+    assert not any(row["name"] in {"Groceries", "Greens", "Spices"} for row in after_group)
+    outing = next(row for row in after_group if row["name"] == "Outing")
+    utilities = next(row for row in after_group if row["name"] == "Utilities")
+    ordered_ids = [row["id"] for row in after_group if row["kind"] == "expense"]
+    swapped = [utilities["id"], outing["id"], *[row_id for row_id in ordered_ids if row_id not in {utilities["id"], outing["id"]}]]
+    parents = {row["id"] for row in after_group if row["kind"] == "expense" and not row["parent_id"]}
+    ordered = client.post(
+        "/categories/order",
+        headers=headers,
+        json={
+            "kind": "expense",
+            "items": [
+                {"id": row_id, "parent_id": next(row["parent_id"] for row in after_group if row["id"] == row_id)}
+                for row_id in swapped
+            ],
+        },
+    )
+    assert ordered.status_code == 200, ordered.text
+    listed = [row["id"] for row in client.get("/categories", headers=headers).json() if row["kind"] == "expense"]
+    assert listed[0] == utilities["id"]
+    assert outing["id"] in parents
 
 
 def test_deleting_a_recorded_payment_brings_the_subscription_back(client):

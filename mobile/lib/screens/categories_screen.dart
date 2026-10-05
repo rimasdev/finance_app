@@ -46,22 +46,19 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
     }
   }
 
-  Future<void> _remove(CategoryModel category) async {
-    final hasChildren = context.read<FolioStore>().categories.any((item) => item.parentId == category.id);
-    if (hasChildren) {
-      showError(context, 'Remove its subcategories first');
-      return;
-    }
-    final used = category.transactionCount > 0;
+  Future<bool> _confirmRemove(CategoryModel category) async {
+    final children = context.read<FolioStore>().categories.where((item) => item.parentId == category.id).toList();
+    final used = category.transactionCount > 0 || children.any((child) => child.transactionCount > 0);
+    if (children.isEmpty && !used) return true;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: FolioColors.card,
         title: Text('Delete ${category.name}?'),
         content: Text(
-          used
-              ? 'Its ${category.transactionCount} transaction${category.transactionCount == 1 ? '' : 's'} will be left uncategorised.'
-              : 'This category will be removed.',
+          children.isNotEmpty
+              ? 'Its subcategories will be removed too. Transactions in them will be left uncategorised.'
+              : 'Its ${category.transactionCount} transaction${category.transactionCount == 1 ? '' : 's'} will be left uncategorised.',
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
@@ -69,7 +66,10 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
         ],
       ),
     );
-    if (confirmed != true || !mounted) return;
+    return confirmed == true;
+  }
+
+  Future<void> _remove(CategoryModel category) async {
     try {
       await context.read<FolioStore>().deleteCategory(category.id);
     } catch (error) {
@@ -77,9 +77,22 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
     }
   }
 
+  Future<void> _reorder(int oldIndex, int newIndex) async {
+    final store = context.read<FolioStore>();
+    final current = displayCategories(store.categories.where((category) => category.kind == _kind));
+    final ordered = reorderCategoryList(current, oldIndex, newIndex);
+    try {
+      await store.reorderCategories(_kind, ordered);
+    } catch (error) {
+      if (mounted) showError(context, error);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final categories = context.watch<FolioStore>().categories.where((category) => category.kind == _kind).toList();
+    final categories = displayCategories(
+      context.watch<FolioStore>().categories.where((category) => category.kind == _kind),
+    );
     return Scaffold(
       appBar: AppBar(title: const Text('Categories')),
       floatingActionButton: FloatingActionButton(
@@ -88,44 +101,113 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
         onPressed: () => _add(),
         child: const Icon(Icons.add),
       ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 96),
+      body: Column(
         children: [
-          ChoiceChipRow(
-            labels: const ['Expense', 'Income'],
-            selected: _kind == 'income' ? 1 : 0,
-            onSelect: (index) => setState(() => _kind = index == 1 ? 'income' : 'expense'),
-          ),
-          const SizedBox(height: 14),
-          for (final group in _groups(categories)) ...[
-            if (group.$2.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(4, 12, 4, 6),
-                child: Text(
-                  group.$1.name,
-                  style: const TextStyle(color: FolioColors.muted, fontWeight: FontWeight.w700, fontSize: 12),
-                ),
-              ),
-            _CategoryTile(
-              category: group.$1,
-              onEdit: () => _rename(group.$1),
-              onAdd: group.$1.parentId == null ? () => _add(parent: group.$1) : null,
-              onDelete: () => _remove(group.$1),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: ChoiceChipRow(
+              labels: const ['Expense', 'Income'],
+              selected: _kind == 'income' ? 1 : 0,
+              onSelect: (index) => setState(() => _kind = index == 1 ? 'income' : 'expense'),
             ),
-            for (final child in group.$2)
-              Padding(
-                padding: const EdgeInsets.only(left: 18),
-                child: _CategoryTile(
-                  category: child,
-                  onEdit: () => _rename(child),
-                  onDelete: () => _remove(child),
-                ),
-              ),
-          ],
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: ReorderableListView.builder(
+              padding: const EdgeInsets.fromLTRB(16, 6, 16, 96),
+              buildDefaultDragHandles: false,
+              itemCount: categories.length,
+              onReorderItem: _reorder,
+              itemBuilder: (context, index) {
+                final category = categories[index];
+                final child = category.parentId != null && categories.any((item) => item.id == category.parentId);
+                return Padding(
+                  key: ValueKey(category.id),
+                  padding: EdgeInsets.only(left: child ? 28 : 0, bottom: 8),
+                  child: Row(
+                    children: [
+                      ReorderableDragStartListener(
+                        index: index,
+                        child: const Padding(
+                          padding: EdgeInsets.only(right: 8),
+                          child: Icon(Icons.drag_handle, color: FolioColors.muted),
+                        ),
+                      ),
+                      Expanded(
+                        child: Dismissible(
+                          key: ValueKey('delete-${category.id}'),
+                          direction: DismissDirection.endToStart,
+                          confirmDismiss: (_) => _confirmRemove(category),
+                          onDismissed: (_) => _remove(category),
+                          background: Container(
+                            alignment: Alignment.centerRight,
+                            padding: const EdgeInsets.only(right: 20),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF8E3A3A),
+                              borderRadius: BorderRadius.circular(24),
+                            ),
+                            child: const Icon(Icons.delete_outline, color: Colors.white),
+                          ),
+                          child: _CategoryTile(
+                            category: category,
+                            onEdit: () => _rename(category),
+                            onAdd: child ? null : () => _add(parent: category),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
         ],
       ),
     );
   }
+}
+
+/// Moves one row, keeps a category's subcategories with it, and lets a subcategory land under another category.
+List<CategoryModel> reorderCategoryList(List<CategoryModel> items, int oldIndex, int newIndex) {
+  if (items.isEmpty || oldIndex < 0 || oldIndex >= items.length || oldIndex == newIndex) return items;
+  if (newIndex < 0) newIndex = 0;
+  if (newIndex >= items.length) newIndex = items.length - 1;
+  if (newIndex == oldIndex) return items;
+
+  final parentIds = {for (final item in items) if (_isParentRow(item, items)) item.id};
+  final moving = items[oldIndex];
+  final next = [...items]..removeAt(oldIndex);
+  next.insert(newIndex, moving);
+  if (parentIds.contains(moving.id)) {
+    final children = [for (final item in items) if (item.parentId == moving.id) item];
+    final childIds = {for (final child in children) child.id};
+    final stripped = [for (final item in next) if (!childIds.contains(item.id)) item];
+    final at = stripped.indexWhere((item) => item.id == moving.id);
+    stripped.insertAll(at + 1, children);
+    return stripped;
+  }
+
+  String? parentId;
+  final at = next.indexWhere((item) => item.id == moving.id);
+  for (var i = at - 1; i >= 0; i--) {
+    if (parentIds.contains(next[i].id)) {
+      parentId = next[i].id;
+      break;
+    }
+  }
+  if (parentId == moving.parentId) return next;
+  next[at] = moving.copyWith(parentId: parentId, clearParent: parentId == null);
+  return next;
+}
+
+bool _isParentRow(CategoryModel item, List<CategoryModel> items) {
+  final known = {for (final row in items) row.id};
+  final parentId = item.parentId;
+  return parentId == null || parentId.isEmpty || !known.contains(parentId);
+}
+
+List<CategoryModel> displayCategories(Iterable<CategoryModel> categories) {
+  return [for (final group in _groups(categories)) ...[group.$1, ...group.$2]];
 }
 
 List<(CategoryModel, List<CategoryModel>)> _groups(Iterable<CategoryModel> categories) {
@@ -147,23 +229,23 @@ List<(CategoryModel, List<CategoryModel>)> _groups(Iterable<CategoryModel> categ
 }
 
 class _CategoryTile extends StatelessWidget {
-  const _CategoryTile({required this.category, required this.onEdit, required this.onDelete, this.onAdd});
+  const _CategoryTile({required this.category, required this.onEdit, this.onAdd});
 
   final CategoryModel category;
   final VoidCallback onEdit;
-  final VoidCallback onDelete;
   final VoidCallback? onAdd;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: FolioCard(
-        child: Row(
-          children: [
-            IconBubble(icon: iconFor(category.icon), color: colorFromHex(category.color)),
-            const SizedBox(width: 12),
-            Expanded(
+    return FolioCard(
+      child: Row(
+        children: [
+          IconBubble(icon: iconFor(category.icon), color: colorFromHex(category.color)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: GestureDetector(
+              onTap: onEdit,
+              behavior: HitTestBehavior.opaque,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -175,24 +257,16 @@ class _CategoryTile extends StatelessWidget {
                 ],
               ),
             ),
-            IconButton(
-              tooltip: 'Edit',
-              onPressed: onEdit,
-              icon: const Icon(Icons.edit_outlined, color: FolioColors.muted, size: 20),
-            ),
-            if (onAdd != null)
-              IconButton(
-                tooltip: 'Add subcategory',
-                onPressed: onAdd,
-                icon: const Icon(Icons.create_new_folder_outlined, color: FolioColors.accent, size: 20),
+          ),
+          if (onAdd != null)
+            GestureDetector(
+              onTap: onAdd,
+              child: const Padding(
+                padding: EdgeInsets.all(8),
+                child: Icon(Icons.create_new_folder_outlined, color: FolioColors.accent, size: 20),
               ),
-            IconButton(
-              tooltip: 'Delete',
-              onPressed: onDelete,
-              icon: const Icon(Icons.delete_outline, color: FolioColors.red, size: 20),
             ),
-          ],
-        ),
+        ],
       ),
     );
   }

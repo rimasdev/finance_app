@@ -30,15 +30,15 @@ class FolioCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final radius = BorderRadius.circular(24);
+    final body = Padding(padding: padding, child: child);
     return Material(
       color: color ?? FolioColors.card,
       elevation: 0,
-      borderRadius: BorderRadius.circular(24),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(24),
-        child: Padding(padding: padding, child: child),
-      ),
+      borderRadius: radius,
+      child: onTap == null
+          ? body
+          : InkWell(onTap: onTap, borderRadius: radius, child: body),
     );
   }
 }

@@ -4,6 +4,7 @@ import 'package:folio/format.dart';
 import 'package:folio/fx.dart';
 import 'package:folio/models.dart';
 import 'package:folio/screens/accounts_screen.dart';
+import 'package:folio/screens/categories_screen.dart';
 import 'package:folio/screens/entry_screens.dart';
 import 'package:folio/screens/explore_screen.dart';
 import 'package:folio/screens/insights_screen.dart';
@@ -15,6 +16,24 @@ import 'package:folio/theme.dart';
 import 'package:provider/provider.dart';
 
 void main() {
+  test('dragging a category keeps its subcategories with it', () {
+    CategoryModel row(String id, {String? parentId}) => CategoryModel(
+          id: id,
+          name: id,
+          kind: 'expense',
+          icon: 'other',
+          color: '#9CA3AF',
+          parentId: parentId,
+          transactionCount: 0,
+        );
+    final items = [row('groceries'), row('rice', parentId: 'groceries'), row('outing'), row('phone', parentId: 'utilities'), row('utilities')];
+    final moved = reorderCategoryList(displayCategories(items), 0, 4);
+    expect(moved.map((item) => item.id).toList(), ['outing', 'utilities', 'phone', 'groceries', 'rice']);
+    final shifted = reorderCategoryList(displayCategories(items), 1, 3);
+    expect(shifted.map((item) => item.id).toList(), ['groceries', 'outing', 'utilities', 'rice', 'phone']);
+    expect(shifted[3].parentId, 'utilities');
+  });
+
   test('money formats rupees the way the ledger shows them', () {
     expect(money(4778), 'Rs. 4,778.00');
     expect(money(-4778), 'Rs. -4,778.00');
