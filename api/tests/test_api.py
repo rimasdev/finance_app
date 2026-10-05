@@ -837,6 +837,33 @@ def test_category_budget_includes_subcategories(client):
     assert any(row["name"] == "Keells" and row["detail"] == "" for row in saved)
 
 
+def test_category_rename_subcategory_and_delete_stick(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    rows = client.get("/categories", headers=headers).json()
+    vegetables = next(row for row in rows if row["name"] == "Vegetables")
+    renamed = client.patch(f"/categories/{vegetables['id']}", headers=headers, json={"name": "Greens"})
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["name"] == "Greens"
+    groceries = next(row for row in rows if row["name"] == "Groceries")
+    created = client.post(
+        "/categories",
+        headers=headers,
+        json={"name": "Snacks", "kind": "expense", "parent_id": groceries["id"]},
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["parent_id"] == groceries["id"]
+    removed = client.delete(f"/categories/{created.json()['id']}", headers=headers)
+    assert removed.status_code == 200, removed.text
+    again = client.get("/categories", headers=headers).json()
+    names = {row["name"] for row in again}
+    assert "Greens" in names
+    assert "Vegetables" not in names
+    assert "Snacks" not in names
+    clash = client.patch(f"/categories/{vegetables['id']}", headers=headers, json={"name": "Spices"})
+    assert clash.status_code == 400
+
+
 def test_deleting_a_recorded_payment_brings_the_subscription_back(client):
     token = auth(client)
     headers = {"Authorization": f"Bearer {token}"}

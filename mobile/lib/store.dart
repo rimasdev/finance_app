@@ -419,6 +419,11 @@ class FolioStore extends ChangeNotifier {
     }
   }
 
+  Future<void> updateCategory(String id, String name) async {
+    await api.patch('/categories/$id', {'name': name.trim()});
+    await refresh();
+  }
+
   Future<void> deleteCategory(String id) async {
     await api.delete('/categories/$id');
     await refresh();

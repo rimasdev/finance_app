@@ -17,23 +17,61 @@ class CategoriesScreen extends StatefulWidget {
 class _CategoriesScreenState extends State<CategoriesScreen> {
   String _kind = 'expense';
 
-  Future<void> _add() async {
-    final controller = TextEditingController();
+  Future<void> _add({CategoryModel? parent}) async {
     final name = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: FolioColors.card,
-        title: Text('New $_kind category'),
-        content: TextField(controller: controller, autofocus: true, decoration: const InputDecoration(hintText: 'Name')),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          TextButton(onPressed: () => Navigator.pop(context, controller.text.trim()), child: const Text('Add')),
-        ],
+      builder: (context) => _NameDialog(
+        title: parent == null ? 'New $_kind category' : 'Subcategory of ${parent.name}',
+        action: 'Add',
       ),
     );
     if (name == null || name.isEmpty || !mounted) return;
     try {
-      await context.read<FolioStore>().createCategory(name, _kind);
+      await context.read<FolioStore>().createCategory(name, parent?.kind ?? _kind, parentId: parent?.id);
+    } catch (error) {
+      if (mounted) showError(context, error);
+    }
+  }
+
+  Future<void> _rename(CategoryModel category) async {
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => _NameDialog(title: 'Edit ${category.name}', action: 'Save', initial: category.name),
+    );
+    if (name == null || name.isEmpty || name == category.name || !mounted) return;
+    try {
+      await context.read<FolioStore>().updateCategory(category.id, name);
+    } catch (error) {
+      if (mounted) showError(context, error);
+    }
+  }
+
+  Future<void> _remove(CategoryModel category) async {
+    final hasChildren = context.read<FolioStore>().categories.any((item) => item.parentId == category.id);
+    if (hasChildren) {
+      showError(context, 'Remove its subcategories first');
+      return;
+    }
+    final used = category.transactionCount > 0;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: FolioColors.card,
+        title: Text('Delete ${category.name}?'),
+        content: Text(
+          used
+              ? 'Its ${category.transactionCount} transaction${category.transactionCount == 1 ? '' : 's'} will be left uncategorised.'
+              : 'This category will be removed.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await context.read<FolioStore>().deleteCategory(category.id);
     } catch (error) {
       if (mounted) showError(context, error);
     }
@@ -47,7 +85,7 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
       floatingActionButton: FloatingActionButton(
         backgroundColor: FolioColors.green,
         foregroundColor: FolioColors.greenInk,
-        onPressed: _add,
+        onPressed: () => _add(),
         child: const Icon(Icons.add),
       ),
       body: ListView(
@@ -68,11 +106,20 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
                   style: const TextStyle(color: FolioColors.muted, fontWeight: FontWeight.w700, fontSize: 12),
                 ),
               ),
-            _CategoryTile(category: group.$1),
+            _CategoryTile(
+              category: group.$1,
+              onEdit: () => _rename(group.$1),
+              onAdd: group.$1.parentId == null ? () => _add(parent: group.$1) : null,
+              onDelete: () => _remove(group.$1),
+            ),
             for (final child in group.$2)
               Padding(
                 padding: const EdgeInsets.only(left: 18),
-                child: _CategoryTile(category: child),
+                child: _CategoryTile(
+                  category: child,
+                  onEdit: () => _rename(child),
+                  onDelete: () => _remove(child),
+                ),
               ),
           ],
         ],
@@ -100,13 +147,15 @@ List<(CategoryModel, List<CategoryModel>)> _groups(Iterable<CategoryModel> categ
 }
 
 class _CategoryTile extends StatelessWidget {
-  const _CategoryTile({required this.category});
+  const _CategoryTile({required this.category, required this.onEdit, required this.onDelete, this.onAdd});
 
   final CategoryModel category;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
+  final VoidCallback? onAdd;
 
   @override
   Widget build(BuildContext context) {
-    final hasChildren = context.watch<FolioStore>().categories.any((item) => item.parentId == category.id);
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: FolioCard(
@@ -126,20 +175,64 @@ class _CategoryTile extends StatelessWidget {
                 ],
               ),
             ),
-            if (category.transactionCount == 0 && !hasChildren)
+            IconButton(
+              tooltip: 'Edit',
+              onPressed: onEdit,
+              icon: const Icon(Icons.edit_outlined, color: FolioColors.muted, size: 20),
+            ),
+            if (onAdd != null)
               IconButton(
-                onPressed: () async {
-                  try {
-                    await context.read<FolioStore>().deleteCategory(category.id);
-                  } catch (error) {
-                    if (context.mounted) showError(context, error);
-                  }
-                },
-                icon: const Icon(Icons.close, color: FolioColors.muted),
+                tooltip: 'Add subcategory',
+                onPressed: onAdd,
+                icon: const Icon(Icons.create_new_folder_outlined, color: FolioColors.accent, size: 20),
               ),
+            IconButton(
+              tooltip: 'Delete',
+              onPressed: onDelete,
+              icon: const Icon(Icons.delete_outline, color: FolioColors.red, size: 20),
+            ),
           ],
         ),
       ),
+    );
+  }
+}
+
+class _NameDialog extends StatefulWidget {
+  const _NameDialog({required this.title, required this.action, this.initial = ''});
+
+  final String title;
+  final String action;
+  final String initial;
+
+  @override
+  State<_NameDialog> createState() => _NameDialogState();
+}
+
+class _NameDialogState extends State<_NameDialog> {
+  late final TextEditingController _controller = TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: FolioColors.card,
+      title: Text(widget.title),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        decoration: const InputDecoration(hintText: 'Name'),
+        onSubmitted: (value) => Navigator.pop(context, value.trim()),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+        TextButton(onPressed: () => Navigator.pop(context, _controller.text.trim()), child: Text(widget.action)),
+      ],
     );
   }
 }

@@ -32,6 +32,7 @@ from app.services import (
     loan_json,
     lkr_settlement,
     ensure_household_categories,
+    remember_skipped_category,
     ensure_payees,
     payee_label,
     remember_payee,
@@ -732,15 +733,59 @@ def create_category(body: CategoryIn, user: User = Depends(current_user), db: Se
     }
 
 
+class CategoryPatch(BaseModel):
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def clean_patch_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Add a name")
+        return value[:80]
+
+
+@router.patch("/categories/{category_id}")
+def update_category(
+    category_id: str,
+    body: CategoryPatch,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    row = _owned_category(db, user, category_id)
+    clash = db.query(Category).filter_by(user_id=user.id, kind=row.kind, name=body.name).first()
+    if clash is not None and clash.id != row.id:
+        raise HTTPException(400, "That category already exists")
+    remember_skipped_category(user, row.kind, row.name)
+    row.name = body.name
+    db.commit()
+    db.refresh(row)
+    return {
+        "id": row.id,
+        "name": row.name,
+        "kind": row.kind,
+        "icon": row.icon,
+        "color": row.color,
+        "parent_id": row.parent_id,
+        "transaction_count": db.query(Transaction).filter_by(user_id=user.id, category_id=row.id, status="posted").count(),
+    }
+
+
 @router.delete("/categories/{category_id}")
 def delete_category(category_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
     row = _owned_category(db, user, category_id)
-    used = db.query(Transaction).filter_by(user_id=user.id, category_id=row.id).count()
-    if used:
-        raise HTTPException(400, "This category still has transactions")
     children = db.query(Category).filter_by(user_id=user.id, parent_id=row.id).count()
     if children:
         raise HTTPException(400, "Remove its subcategories first")
+    db.query(Transaction).filter_by(user_id=user.id, category_id=row.id).update(
+        {"category_id": None},
+        synchronize_session=False,
+    )
+    db.query(Budget).filter_by(user_id=user.id, category_id=row.id).update(
+        {"category_id": None},
+        synchronize_session=False,
+    )
+    remember_skipped_category(user, row.kind, row.name)
     db.delete(row)
     db.commit()
     return {"deleted": True}

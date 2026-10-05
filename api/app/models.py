@@ -30,6 +30,7 @@ class User(Base):
     month_start_day: Mapped[int] = mapped_column(default=1)
     withdrawal_to_cash: Mapped[bool] = mapped_column(Boolean, default=False)
     cash_account_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    skipped_categories: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     accounts: Mapped[list["Account"]] = relationship(back_populates="user")

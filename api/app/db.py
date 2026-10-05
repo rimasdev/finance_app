@@ -72,6 +72,8 @@ def _ensure_user_columns() -> None:
         statements.append(f"ALTER TABLE users ADD COLUMN withdrawal_to_cash BOOLEAN DEFAULT {user_bool}")
     if "cash_account_id" not in present:
         statements.append("ALTER TABLE users ADD COLUMN cash_account_id VARCHAR(36)")
+    if "skipped_categories" not in present:
+        statements.append("ALTER TABLE users ADD COLUMN skipped_categories TEXT DEFAULT ''")
     if "transactions" in inspector.get_table_names():
         txn_columns = {column["name"] for column in inspector.get_columns("transactions")}
         if "loan_id" not in txn_columns:

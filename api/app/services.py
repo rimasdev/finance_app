@@ -148,14 +148,30 @@ def _retire_shop_categories(db: Session, user_id: str) -> None:
         phone.parent_id = utilities.id
 
 
+def skipped_category_keys(user: User) -> set[str]:
+    return {part for part in (user.skipped_categories or "").split("\n") if part}
+
+
+def remember_skipped_category(user: User, kind: str, name: str) -> None:
+    key = f"{kind}|{name}"
+    current = skipped_category_keys(user)
+    if key in current:
+        return
+    user.skipped_categories = "\n".join(sorted(current | {key}))
+
+
 def ensure_household_categories(db: Session, user_id: str) -> None:
     """Add the household groups, and tuck an existing match such as Spices under its group."""
+    user = db.get(User, user_id)
+    skipped = skipped_category_keys(user) if user is not None else set()
     rows = db.query(Category).filter_by(user_id=user_id, kind="expense").all()
     by_name = {row.name: row for row in rows}
     has_children = {row.parent_id for row in rows if row.parent_id}
     order = max((row.sort_order or 0 for row in rows), default=-1) + 1
     for name, icon, color, children in HOUSEHOLD_CATEGORIES:
         parent = by_name.get(name)
+        if parent is None and f"expense|{name}" in skipped:
+            continue
         if parent is None:
             parent = Category(
                 user_id=user_id,
@@ -173,6 +189,8 @@ def ensure_household_categories(db: Session, user_id: str) -> None:
             continue
         for index, (child_name, child_icon, child_color) in enumerate(children):
             child = by_name.get(child_name)
+            if child is None and f"expense|{child_name}" in skipped:
+                continue
             if child is None:
                 child = Category(
                     user_id=user_id,
