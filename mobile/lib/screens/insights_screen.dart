@@ -98,6 +98,27 @@ class InsightsScreen extends StatelessWidget {
                             fontWeight: FontWeight.w700,
                           ),
                         ),
+                        if (slice.children.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          for (final child in slice.children)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 4),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      child.name,
+                                      style: const TextStyle(color: FolioColors.muted, fontSize: 13),
+                                    ),
+                                  ),
+                                  Text(
+                                    money(child.amount),
+                                    style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
                         const SizedBox(height: 8),
                         ClipRRect(
                           borderRadius: BorderRadius.circular(6),
@@ -138,10 +159,14 @@ class CategorySpendScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final store = context.watch<FolioStore>();
+    final childIds = {
+      for (final category in store.categories)
+        if (category.parentId == categoryId) category.id,
+    };
     final items = [
       for (final day in store.timeline?.days ?? <TimelineDay>[])
         for (final txn in day.items)
-          if (_inCategory(txn)) txn,
+          if (_inCategory(txn, childIds)) txn,
     ];
     return Scaffold(
       appBar: AppBar(title: Text(name)),
@@ -216,11 +241,11 @@ class CategorySpendScreen extends StatelessWidget {
     );
   }
 
-  bool _inCategory(TxnModel txn) {
+  bool _inCategory(TxnModel txn, Set<String> childIds) {
     if (txn.hidden || txn.direction != 'expense') return false;
     final id = txn.categoryId ?? '';
     if (categoryId == null || categoryId!.isEmpty) return id.isEmpty;
-    return id == categoryId;
+    return id == categoryId || childIds.contains(id);
   }
 }
 

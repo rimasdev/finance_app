@@ -8,6 +8,7 @@ import '../store.dart';
 import '../subscriptions.dart';
 import '../theme.dart';
 import '../widgets.dart';
+import 'payee_screen.dart';
 
 const _kinds = ['repeat', 'installment', 'subscription'];
 
@@ -281,7 +282,7 @@ class _RecurringFormScreenState extends State<RecurringFormScreen> {
     if (name.isEmpty || amount == null || amount <= 0 || _accountId == null) {
       showError(
         context,
-        Exception(needsPayment ? 'Add the shop, an amount, and an account' : 'Add a name, an amount, and an account'),
+        Exception(needsPayment ? 'Add the payee, an amount, and an account' : 'Add a name, an amount, and an account'),
       );
       return;
     }
@@ -357,10 +358,23 @@ class _RecurringFormScreenState extends State<RecurringFormScreen> {
               ),
             ],
           ] else ...[
-            TextField(
-              controller: _name,
-              textCapitalization: TextCapitalization.words,
-              decoration: const InputDecoration(hintText: 'Shop'),
+            ListTile(
+              contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+              tileColor: FolioColors.card,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              title: const Text('Payee', style: TextStyle(color: FolioColors.muted, fontSize: 12)),
+              subtitle: Text(_name.text.trim().isEmpty ? 'Choose who you pay' : _name.text.trim()),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () async {
+                final picked = await Navigator.push<String>(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => PayeePickerScreen(store: store, current: _name.text.trim()),
+                  ),
+                );
+                if (picked == null) return;
+                setState(() => _name.text = picked);
+              },
             ),
             const SizedBox(height: 10),
             ListTile(

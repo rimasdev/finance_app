@@ -266,7 +266,6 @@ class _HomeHero extends StatefulWidget {
 class _HomeHeroState extends State<_HomeHero> {
   Timer? _timer;
   var _index = 0;
-  var _open = false;
 
   List<RecurringModel> get _sorted {
     final items = [...widget.upcoming];
@@ -281,6 +280,11 @@ class _HomeHeroState extends State<_HomeHero> {
     return items;
   }
 
+  List<RecurringModel> get _soon => [
+    for (final item in _sorted)
+      if ((_daysUntil(item.nextOn) ?? 999) <= 7) item,
+  ];
+
   @override
   void initState() {
     super.initState();
@@ -290,16 +294,16 @@ class _HomeHeroState extends State<_HomeHero> {
   @override
   void didUpdateWidget(_HomeHero oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (_index >= _sorted.length) _index = 0;
+    if (_index >= _soon.length) _index = 0;
     _arm();
   }
 
   void _arm() {
     _timer?.cancel();
-    if (_open || _sorted.length < 2) return;
+    if (_soon.length < 2) return;
     _timer = Timer.periodic(const Duration(seconds: 4), (_) {
-      if (!mounted || _open) return;
-      setState(() => _index = (_index + 1) % _sorted.length);
+      if (!mounted) return;
+      setState(() => _index = (_index + 1) % _soon.length);
     });
   }
 
@@ -309,19 +313,17 @@ class _HomeHeroState extends State<_HomeHero> {
     super.dispose();
   }
 
-  void _toggle() {
-    setState(() => _open = !_open);
-    _arm();
+  void _openAll() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => _UpcomingScreen(items: _sorted)),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final items = _sorted;
-    final shown = items.isEmpty
-        ? const <RecurringModel>[]
-        : _open
-            ? items
-            : [items[_index.clamp(0, items.length - 1)]];
+    final soon = _soon;
+    final current = soon.isEmpty ? null : soon[_index.clamp(0, soon.length - 1)];
     return ClipRRect(
       borderRadius: BorderRadius.circular(24),
       child: Column(
@@ -349,34 +351,18 @@ class _HomeHeroState extends State<_HomeHero> {
               ),
             ),
           ),
-          if (shown.isNotEmpty)
+          if (current != null)
             ColoredBox(
               color: const Color(0xFF1C1E1D),
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 6, 16, 2),
-                child: Column(
-                  children: [
-                    if (_open)
-                      for (final item in shown) _UpcomingRow(item: item)
-                    else
-                      AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 280),
-                        child: _UpcomingRow(
-                          key: ValueKey(shown.first.id),
-                          item: shown.first,
-                        ),
-                      ),
-                    if (items.length > 1)
-                      IconButton(
-                        onPressed: _toggle,
-                        tooltip: _open ? 'Show the next one' : 'Show all',
-                        visualDensity: VisualDensity.compact,
-                        icon: Icon(
-                          _open ? Icons.keyboard_arrow_up_rounded : Icons.keyboard_arrow_down_rounded,
-                          color: FolioColors.muted,
-                        ),
-                      ),
-                  ],
+                padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 280),
+                  child: _UpcomingRow(
+                    key: ValueKey(current.id),
+                    item: current,
+                    onTap: _openAll,
+                  ),
                 ),
               ),
             ),
@@ -387,18 +373,20 @@ class _HomeHeroState extends State<_HomeHero> {
 }
 
 class _UpcomingRow extends StatelessWidget {
-  const _UpcomingRow({super.key, required this.item});
+  const _UpcomingRow({super.key, required this.item, this.onTap});
 
   final RecurringModel item;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final mark = item.provider.isNotEmpty ? item.provider : item.name;
     return InkWell(
-      onTap: () => Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => const RecurringScreen()),
-      ),
+      onTap: onTap ??
+          () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const RecurringScreen()),
+          ),
       borderRadius: BorderRadius.circular(12),
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 8),
@@ -426,18 +414,43 @@ class _UpcomingRow extends StatelessWidget {
   }
 }
 
-String _duePhrase(String iso) {
+int? _daysUntil(String iso) {
   final date = DateTime.tryParse(iso);
-  if (date == null || iso.isEmpty) return '';
+  if (date == null || iso.isEmpty) return null;
   final today = DateTime.now();
   final start = DateTime(today.year, today.month, today.day);
   final target = DateTime(date.year, date.month, date.day);
-  final days = target.difference(start).inDays;
+  return target.difference(start).inDays;
+}
+
+String _duePhrase(String iso) {
+  final days = _daysUntil(iso);
+  if (days == null) return '';
   if (days == 0) return 'Today';
   if (days == 1) return 'Tomorrow';
   if (days > 1) return 'In $days days';
   if (days == -1) return 'Yesterday';
   return '${-days} days ago';
+}
+
+class _UpcomingScreen extends StatelessWidget {
+  const _UpcomingScreen({required this.items});
+
+  final List<RecurringModel> items;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Coming up')),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+        children: [
+          for (final item in items)
+            _UpcomingRow(item: item),
+        ],
+      ),
+    );
+  }
 }
 
 String _firstName(String name) {

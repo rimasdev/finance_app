@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../icons.dart';
+import '../models.dart';
 import '../store.dart';
 import '../theme.dart';
 import '../widgets.dart';
@@ -58,41 +59,86 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
             onSelect: (index) => setState(() => _kind = index == 1 ? 'income' : 'expense'),
           ),
           const SizedBox(height: 14),
-          for (final category in categories) ...[
-            FolioCard(
-              child: Row(
+          for (final group in _groups(categories)) ...[
+            if (group.$2.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 12, 4, 6),
+                child: Text(
+                  group.$1.name,
+                  style: const TextStyle(color: FolioColors.muted, fontWeight: FontWeight.w700, fontSize: 12),
+                ),
+              ),
+            _CategoryTile(category: group.$1),
+            for (final child in group.$2)
+              Padding(
+                padding: const EdgeInsets.only(left: 18),
+                child: _CategoryTile(category: child),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+List<(CategoryModel, List<CategoryModel>)> _groups(Iterable<CategoryModel> categories) {
+  final list = categories.toList();
+  final known = {for (final category in list) category.id};
+  final children = <String, List<CategoryModel>>{};
+  final parents = <CategoryModel>[];
+  for (final category in list) {
+    final parentId = category.parentId;
+    if (parentId != null && parentId.isNotEmpty && known.contains(parentId)) {
+      children.putIfAbsent(parentId, () => []).add(category);
+    } else {
+      parents.add(category);
+    }
+  }
+  return [
+    for (final parent in parents) (parent, children[parent.id] ?? const []),
+  ];
+}
+
+class _CategoryTile extends StatelessWidget {
+  const _CategoryTile({required this.category});
+
+  final CategoryModel category;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasChildren = context.watch<FolioStore>().categories.any((item) => item.parentId == category.id);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: FolioCard(
+        child: Row(
+          children: [
+            IconBubble(icon: iconFor(category.icon), color: colorFromHex(category.color)),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  IconBubble(icon: iconFor(category.icon), color: colorFromHex(category.color)),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(category.name, style: const TextStyle(fontWeight: FontWeight.w600)),
-                        Text(
-                          '${category.transactionCount} transaction${category.transactionCount == 1 ? '' : 's'}',
-                          style: const TextStyle(color: FolioColors.muted, fontSize: 12),
-                        ),
-                      ],
-                    ),
+                  Text(category.name, style: const TextStyle(fontWeight: FontWeight.w600)),
+                  Text(
+                    '${category.transactionCount} transaction${category.transactionCount == 1 ? '' : 's'}',
+                    style: const TextStyle(color: FolioColors.muted, fontSize: 12),
                   ),
-                  if (category.transactionCount == 0)
-                    IconButton(
-                      onPressed: () async {
-                        try {
-                          await context.read<FolioStore>().deleteCategory(category.id);
-                        } catch (error) {
-                          if (context.mounted) showError(context, error);
-                        }
-                      },
-                      icon: const Icon(Icons.close, color: FolioColors.muted),
-                    ),
                 ],
               ),
             ),
-            const SizedBox(height: 8),
+            if (category.transactionCount == 0 && !hasChildren)
+              IconButton(
+                onPressed: () async {
+                  try {
+                    await context.read<FolioStore>().deleteCategory(category.id);
+                  } catch (error) {
+                    if (context.mounted) showError(context, error);
+                  }
+                },
+                icon: const Icon(Icons.close, color: FolioColors.muted),
+              ),
           ],
-        ],
+        ),
       ),
     );
   }

@@ -372,8 +372,8 @@ void main() {
     await tester.pump();
     expect(find.text('Choose Mint Pay, Koko, Payzy, or Snap'), findsOneWidget);
     expect(find.text('Currency'), findsOneWidget);
-    final shop = tester.widget<TextField>(find.byType(TextField).first);
-    expect(shop.decoration?.hintText, 'Shop');
+    expect(find.text('Payee'), findsOneWidget);
+    expect(find.text('Choose who you pay'), findsOneWidget);
   });
 
   testWidgets('a withdrawal can be changed into a transfer to cash', (
@@ -591,5 +591,63 @@ void main() {
     expect(find.text('Kids Mania Kandy'), findsOneWidget);
     expect(find.text('Keells'), findsNothing);
     expect(find.text('1 this month'), findsOneWidget);
+  });
+
+  testWidgets('labels opens and category search filters as you type', (tester) async {
+    final store = FolioStore()
+      ..accounts = [
+        AccountModel(
+          id: 'cash',
+          name: 'Cash',
+          type: 'cash',
+          purpose: 'personal',
+          bankName: '',
+          last4: '',
+          smsSender: '',
+          openingBalance: 0,
+          balance: 100,
+          automationsEnabled: true,
+        ),
+      ]
+      ..categories = [
+        CategoryModel(id: 'util', name: 'Utilities', kind: 'expense', icon: 'utilities', color: '#F5C542', transactionCount: 0),
+        CategoryModel(
+          id: 'phone',
+          name: 'Phone',
+          kind: 'expense',
+          icon: 'phone',
+          color: '#7EB6FF',
+          parentId: 'util',
+          transactionCount: 0,
+        ),
+        CategoryModel(id: 'food', name: 'Groceries', kind: 'expense', icon: 'groceries', color: '#8ED4B0', transactionCount: 0),
+      ];
+    await tester.pumpWidget(
+      ChangeNotifierProvider(
+        create: (_) => store,
+        child: MaterialApp(theme: buildFolioTheme(), home: const TransactionFormScreen()),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Labels'));
+    await tester.pumpAndSettle();
+    expect(find.text('Use Labels to organize your records better. Start with (+) to create first one.'), findsOneWidget);
+    await tester.tap(find.byTooltip('Add label'));
+    await tester.pumpAndSettle();
+    expect(find.text('New label'), findsOneWidget);
+    await tester.tapAt(const Offset(8, 8));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.text('New label'), findsNothing);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Category'));
+    await tester.pumpAndSettle();
+    expect(find.text('Utilities'), findsWidgets);
+    expect(find.text('Groceries'), findsOneWidget);
+    await tester.enterText(find.widgetWithText(TextField, 'Search categories'), 'pho');
+    await tester.pump();
+    expect(find.text('Phone'), findsOneWidget);
+    expect(find.text('Groceries'), findsNothing);
   });
 }

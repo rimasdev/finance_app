@@ -92,6 +92,11 @@ class Transaction(Base):
     merchant: Mapped[str] = mapped_column(String(160), default="")
     note: Mapped[str] = mapped_column(Text, default="")
     tags: Mapped[str] = mapped_column(String(200), default="")
+    payment_type: Mapped[str] = mapped_column(String(40), default="Cash")
+    warranty: Mapped[str] = mapped_column(String(80), default="")
+    clear_status: Mapped[str] = mapped_column(String(20), default="cleared")
+    place: Mapped[str] = mapped_column(String(160), default="")
+    photo: Mapped[str] = mapped_column(String(400), default="")
     occurred_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     scope: Mapped[str] = mapped_column(String(16), default="personal")
     source: Mapped[str] = mapped_column(String(16), default="manual")
@@ -151,6 +156,17 @@ class Recurring(Base):
     installments_done: Mapped[int] = mapped_column(default=0)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Payee(Base):
+    __tablename__ = "payees"
+    __table_args__ = (UniqueConstraint("user_id", "name", "detail", name="uq_payee"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    detail: Mapped[str] = mapped_column(String(40), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 

@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import decode_token, hash_password, make_token, verify_password
 from app.db import get_db
-from app.models import Account, Budget, Category, Loan, LoanPayment, Recurring, Transaction, User, utcnow
+from app.models import Account, Budget, Category, Loan, LoanPayment, Payee, Recurring, Transaction, User, utcnow
 from app.oauth import OAuthError, verify_apple_id_token, verify_google_id_token
 from app.sms_parser import parse_sms
 from app.services import (
@@ -31,6 +31,10 @@ from app.services import (
     remember_card,
     loan_json,
     lkr_settlement,
+    ensure_household_categories,
+    ensure_payees,
+    payee_label,
+    remember_payee,
     seed_categories,
     timeline,
     txn_json,
@@ -194,6 +198,20 @@ def _clean_tags(value: str) -> str:
     return ", ".join(parts)
 
 
+_PAYMENT_TYPES = ("Cash", "Card", "Bank transfer", "Online")
+_CLEAR_STATUSES = ("reconciled", "cleared", "uncleared")
+
+
+def _clean_payment_type(value: str) -> str:
+    value = value.strip()
+    return value if value in _PAYMENT_TYPES else "Cash"
+
+
+def _clean_clear_status(value: str) -> str:
+    value = value.strip().lower()
+    return value if value in _CLEAR_STATUSES else "cleared"
+
+
 class TxnIn(BaseModel):
     account_id: str
     direction: str
@@ -206,6 +224,11 @@ class TxnIn(BaseModel):
     occurred_at: datetime | None = None
     note: str = ""
     tags: str = ""
+    payment_type: str = "Cash"
+    warranty: str = ""
+    clear_status: str = "cleared"
+    place: str = ""
+    photo: str = ""
     scope: str | None = None
 
     @field_validator("direction")
@@ -229,6 +252,11 @@ class TxnPatch(BaseModel):
     merchant: str | None = None
     note: str | None = None
     tags: str | None = None
+    payment_type: str | None = None
+    warranty: str | None = None
+    clear_status: str | None = None
+    place: str | None = None
+    photo: str | None = None
     scope: str | None = None
     amount: Decimal | None = Field(default=None, gt=0)
     fx_amount: Decimal | None = Field(default=None, gt=0)
@@ -466,6 +494,7 @@ def patch_me(body: MePatch, user: User = Depends(current_user), db: Session = De
 
 @router.delete("/me")
 def delete_me(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    db.query(Payee).filter_by(user_id=user.id).delete()
     db.query(Budget).filter_by(user_id=user.id).delete()
     db.query(Recurring).filter_by(user_id=user.id).delete()
     db.query(Transaction).filter_by(user_id=user.id).delete()
@@ -642,6 +671,8 @@ def delete_account(account_id: str, user: User = Depends(current_user), db: Sess
 
 @router.get("/categories")
 def list_categories(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    ensure_household_categories(db, user.id)
+    db.commit()
     counts: dict[str, int] = {}
     for txn in db.query(Transaction).filter_by(user_id=user.id, status="posted").all():
         if txn.category_id:
@@ -715,6 +746,58 @@ def delete_category(category_id: str, user: User = Depends(current_user), db: Se
     return {"deleted": True}
 
 
+class PayeeIn(BaseModel):
+    name: str
+    detail: str = ""
+
+    @field_validator("name")
+    @classmethod
+    def clean_payee_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Add a name")
+        return value[:80]
+
+    @field_validator("detail")
+    @classmethod
+    def clean_payee_detail(cls, value: str) -> str:
+        return value.strip()[:40]
+
+
+def _payee_json(row: Payee) -> dict:
+    return {"id": row.id, "name": row.name, "detail": row.detail, "label": payee_label(row.name, row.detail)}
+
+
+@router.get("/payees")
+def list_payees(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    ensure_payees(db, user.id)
+    db.commit()
+    rows = db.query(Payee).filter_by(user_id=user.id).order_by(Payee.name, Payee.detail).all()
+    return [_payee_json(row) for row in rows]
+
+
+@router.post("/payees")
+def create_payee(body: PayeeIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    exists = db.query(Payee).filter_by(user_id=user.id, name=body.name, detail=body.detail).first()
+    if exists:
+        return _payee_json(exists)
+    row = Payee(user_id=user.id, name=body.name, detail=body.detail)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return _payee_json(row)
+
+
+@router.delete("/payees/{payee_id}")
+def delete_payee(payee_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    row = db.get(Payee, payee_id)
+    if row is None or row.user_id != user.id:
+        raise HTTPException(404, "Payee not found")
+    db.delete(row)
+    db.commit()
+    return {"deleted": True}
+
+
 @router.get("/transactions")
 def list_transactions(
     status: str = "posted",
@@ -763,6 +846,11 @@ def create_transaction(body: TxnIn, user: User = Depends(current_user), db: Sess
         merchant=merchant,
         note=body.note.strip(),
         tags=_clean_tags(body.tags),
+        payment_type=_clean_payment_type(body.payment_type),
+        warranty=body.warranty.strip()[:80],
+        clear_status=_clean_clear_status(body.clear_status),
+        place=body.place.strip()[:160],
+        photo=body.photo.strip()[:400],
         occurred_at=(body.occurred_at or datetime.utcnow()).replace(tzinfo=None),
         scope=scope,
         source="manual",
@@ -770,6 +858,7 @@ def create_transaction(body: TxnIn, user: User = Depends(current_user), db: Sess
         hidden=body.hidden,
     )
     db.add(txn)
+    remember_payee(db, user.id, merchant)
     _settle_matching_recurring(db, user, txn)
     db.commit()
     db.refresh(txn)
@@ -815,10 +904,21 @@ def patch_transaction(
         if txn.direction == "transfer" and not merchant:
             merchant = "Transfer"
         txn.merchant = merchant
+        remember_payee(db, user.id, merchant)
     if "note" in data:
         txn.note = (data["note"] or "").strip()
     if "tags" in data:
         txn.tags = _clean_tags(data["tags"] or "")
+    if "payment_type" in data:
+        txn.payment_type = _clean_payment_type(data["payment_type"] or "")
+    if "warranty" in data:
+        txn.warranty = (data["warranty"] or "").strip()[:80]
+    if "clear_status" in data:
+        txn.clear_status = _clean_clear_status(data["clear_status"] or "")
+    if "place" in data:
+        txn.place = (data["place"] or "").strip()[:160]
+    if "photo" in data:
+        txn.photo = (data["photo"] or "").strip()[:400]
     if "scope" in data and data["scope"] in PURPOSES:
         txn.scope = data["scope"]
     if "amount" in data and data["amount"] is not None:

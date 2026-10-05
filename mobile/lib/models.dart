@@ -113,6 +113,22 @@ class CategoryModel {
   );
 }
 
+class PayeeModel {
+  PayeeModel({required this.id, required this.name, required this.detail, required this.label});
+
+  final String id;
+  final String name;
+  final String detail;
+  final String label;
+
+  factory PayeeModel.fromJson(Map<String, dynamic> json) {
+    final name = json['name'] as String? ?? '';
+    final detail = json['detail'] as String? ?? '';
+    final label = json['label'] as String? ?? (detail.isEmpty ? name : '$name · $detail');
+    return PayeeModel(id: json['id'] as String, name: name, detail: detail, label: label);
+  }
+}
+
 class TxnModel {
   TxnModel({
     required this.id,
@@ -132,6 +148,11 @@ class TxnModel {
     required this.merchant,
     required this.note,
     this.tags = const [],
+    this.paymentType = 'Cash',
+    this.warranty = '',
+    this.clearStatus = 'cleared',
+    this.place = '',
+    this.photo = '',
     required this.occurredAt,
     required this.scope,
     required this.source,
@@ -158,6 +179,11 @@ class TxnModel {
   final String merchant;
   final String note;
   final List<String> tags;
+  final String paymentType;
+  final String warranty;
+  final String clearStatus;
+  final String place;
+  final String photo;
   final DateTime occurredAt;
   final String scope;
   final String source;
@@ -197,6 +223,11 @@ class TxnModel {
       for (final tag in (json['tags'] as String? ?? '').split(','))
         if (tag.trim().isNotEmpty) tag.trim(),
     ],
+    paymentType: json['payment_type'] as String? ?? 'Cash',
+    warranty: json['warranty'] as String? ?? '',
+    clearStatus: json['clear_status'] as String? ?? 'cleared',
+    place: json['place'] as String? ?? '',
+    photo: json['photo'] as String? ?? '',
     occurredAt: DateTime.parse(json['occurred_at'] as String).toLocal(),
     scope: json['scope'] as String? ?? 'personal',
     source: json['source'] as String? ?? 'manual',
@@ -272,6 +303,7 @@ class Slice {
     required this.color,
     required this.amount,
     required this.percent,
+    this.children = const [],
   });
 
   final String? categoryId;
@@ -280,6 +312,7 @@ class Slice {
   final String color;
   final double amount;
   final double percent;
+  final List<Slice> children;
 
   factory Slice.fromJson(Map<String, dynamic> json) => Slice(
     categoryId: json['category_id'] as String?,
@@ -288,6 +321,10 @@ class Slice {
     color: json['color'] as String? ?? '#9CA3AF',
     amount: (json['amount'] as num).toDouble(),
     percent: (json['percent'] as num).toDouble(),
+    children: [
+      for (final row in json['children'] as List? ?? [])
+        Slice.fromJson(row as Map<String, dynamic>),
+    ],
   );
 }
 

@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.models import Account, Budget, Category, Transaction, User, utcnow
+from app.models import Account, Budget, Category, Payee, Transaction, User, utcnow
 from app.sms_parser import looks_like_withdrawal, parse_sms
 
 EXPENSE_CATEGORIES = [
@@ -34,6 +34,70 @@ INCOME_CATEGORIES = [
     ("Other income", "other", "#9CA3AF"),
 ]
 
+# Main groups are what a month should compare. The names under each one are
+# the specific purchase, so rice and vegetables still add up to Groceries.
+HOUSEHOLD_CATEGORIES = [
+    (
+        "Groceries",
+        "groceries",
+        "#8ED4B0",
+        [
+            ("Rice and staples", "groceries", "#8ED4B0"),
+            ("Spices", "spices", "#E7C27A"),
+            ("Daily needs", "shopping", "#8ED4B0"),
+            ("Vegetables", "groceries", "#8ED4B0"),
+            ("Meat", "dining", "#E7C27A"),
+            ("Sweets", "dining", "#F472B6"),
+        ],
+    ),
+    (
+        "Dining out",
+        "dining",
+        "#FB923C",
+        [
+            ("Breakfast", "dining", "#FB923C"),
+            ("Lunch", "dining", "#FB923C"),
+            ("Dinner", "dining", "#FB923C"),
+        ],
+    ),
+    ("Outing", "entertainment", "#F472B6", []),
+    (
+        "School",
+        "education",
+        "#60A5FA",
+        [
+            ("School items", "education", "#60A5FA"),
+            ("School transport", "transport", "#60A5FA"),
+            ("Books", "education", "#60A5FA"),
+        ],
+    ),
+    ("Transport", "transport", "#7EB6FF", []),
+    (
+        "Utilities",
+        "utilities",
+        "#F5C542",
+        [
+            ("Electricity", "utilities", "#F5C542"),
+            ("Water", "utilities", "#7EB6FF"),
+            ("Internet", "utilities", "#F5C542"),
+            ("Phone", "phone", "#7EB6FF"),
+        ],
+    ),
+    (
+        "Subscriptions",
+        "subscriptions",
+        "#C5D7F6",
+        [
+            ("iCloud+", "subscriptions", "#C5D7F6"),
+            ("Spotify", "subscriptions", "#8ED4B0"),
+            ("Cursor", "subscriptions", "#C5D7F6"),
+        ],
+    ),
+    ("Gym", "health", "#8ED4B0", []),
+    ("Toys", "shopping", "#F472B6", []),
+    ("Charity", "gifts", "#F87171", []),
+]
+
 
 def money(value) -> float:
     return float(Decimal(str(value)).quantize(Decimal("0.01")))
@@ -48,6 +112,115 @@ def seed_categories(db: Session, user_id: str) -> None:
     for name, icon, color in INCOME_CATEGORIES:
         db.add(Category(user_id=user_id, name=name, kind="income", icon=icon, color=color, sort_order=order))
         order += 1
+    db.flush()
+    ensure_household_categories(db, user_id)
+
+
+_NOT_CATEGORIES = {"Hutch", "Dialog", "Mobitel", "Business phone"}
+
+
+def _retire_shop_categories(db: Session, user_id: str) -> None:
+    """Hutch, Dialog and Mobitel are shops, so they are not categories."""
+    rows = db.query(Category).filter_by(user_id=user_id, kind="expense").all()
+    by_name = {row.name: row for row in rows}
+    phone = by_name.get("Phone")
+    utilities = by_name.get("Utilities")
+    for name in _NOT_CATEGORIES:
+        row = by_name.get(name)
+        if row is None:
+            continue
+        if db.query(Category).filter_by(user_id=user_id, parent_id=row.id).count():
+            continue
+        if phone is not None and phone.id != row.id:
+            db.query(Transaction).filter_by(user_id=user_id, category_id=row.id).update(
+                {"category_id": phone.id},
+                synchronize_session=False,
+            )
+            db.query(Budget).filter_by(user_id=user_id, category_id=row.id).update(
+                {"category_id": phone.id},
+                synchronize_session=False,
+            )
+        db.delete(row)
+    db.flush()
+    if phone is None or utilities is None or phone.id == utilities.id:
+        return
+    if phone.parent_id is None and db.query(Category).filter_by(user_id=user_id, parent_id=phone.id).count() == 0:
+        phone.parent_id = utilities.id
+
+
+def ensure_household_categories(db: Session, user_id: str) -> None:
+    """Add the household groups, and tuck an existing match such as Spices under its group."""
+    rows = db.query(Category).filter_by(user_id=user_id, kind="expense").all()
+    by_name = {row.name: row for row in rows}
+    has_children = {row.parent_id for row in rows if row.parent_id}
+    order = max((row.sort_order or 0 for row in rows), default=-1) + 1
+    for name, icon, color, children in HOUSEHOLD_CATEGORIES:
+        parent = by_name.get(name)
+        if parent is None:
+            parent = Category(
+                user_id=user_id,
+                name=name,
+                kind="expense",
+                icon=icon,
+                color=color,
+                sort_order=order,
+            )
+            db.add(parent)
+            db.flush()
+            by_name[name] = parent
+            order += 1
+        elif parent.parent_id:
+            continue
+        for index, (child_name, child_icon, child_color) in enumerate(children):
+            child = by_name.get(child_name)
+            if child is None:
+                child = Category(
+                    user_id=user_id,
+                    name=child_name,
+                    kind="expense",
+                    icon=child_icon,
+                    color=child_color,
+                    parent_id=parent.id,
+                    sort_order=index,
+                )
+                db.add(child)
+                by_name[child_name] = child
+            elif child.id != parent.id and child.parent_id is None and child.id not in has_children:
+                child.parent_id = parent.id
+                child.sort_order = index
+    _retire_shop_categories(db, user_id)
+
+
+PAYEE_PRESETS = ("Hutch", "Dialog", "Mobitel")
+
+
+def payee_label(name: str, detail: str) -> str:
+    detail = (detail or "").strip()
+    return f"{name} · {detail}" if detail else name
+
+
+def remember_payee(db: Session, user_id: str, merchant: str) -> None:
+    text = (merchant or "").strip()
+    if not text or text.lower() == "transfer":
+        return
+    if " · " in text:
+        name, detail = text.split(" · ", 1)
+    else:
+        name, detail = text, ""
+    name = name.strip()[:80]
+    detail = detail.strip()[:40]
+    if not name:
+        return
+    exists = db.query(Payee).filter_by(user_id=user_id, name=name, detail=detail).first()
+    if exists is None:
+        db.add(Payee(user_id=user_id, name=name, detail=detail))
+
+
+def ensure_payees(db: Session, user_id: str) -> None:
+    have = {row.name for row in db.query(Payee).filter_by(user_id=user_id, detail="").all()}
+    for name in PAYEE_PRESETS:
+        if name not in have:
+            db.add(Payee(user_id=user_id, name=name, detail=""))
 
 
 def user_json(user: User) -> dict:
@@ -233,6 +406,11 @@ def txn_json(txn: Transaction, accounts: dict[str, Account], categories: dict[st
         "merchant": txn.merchant,
         "note": txn.note or "",
         "tags": txn.tags or "",
+        "payment_type": txn.payment_type or "Cash",
+        "warranty": txn.warranty or "",
+        "clear_status": txn.clear_status or "cleared",
+        "place": txn.place or "",
+        "photo": txn.photo or "",
         "occurred_at": iso(txn.occurred_at),
         "scope": txn.scope,
         "source": txn.source,
@@ -345,6 +523,7 @@ def insights(db: Session, user: User, month_value: str | None) -> dict:
     start, end = utc_window(start_d, end_d, user.timezone)
     categories = category_map(db, user.id)
     totals: dict[str, Decimal] = {}
+    parts: dict[str, dict[str, Decimal]] = {}
     grand = Decimal("0")
     for txn in posted_in_window(db, user, start, end):
         if txn.hidden:
@@ -356,12 +535,33 @@ def insights(db: Session, user: User, month_value: str | None) -> dict:
         if txn.direction != "expense":
             continue
         grand += Decimal(str(txn.amount))
-        key = txn.category_id or ""
-        totals[key] = totals.get(key, Decimal("0")) + Decimal(str(txn.amount))
+        category = categories.get(txn.category_id or "")
+        if category is not None and category.parent_id and category.parent_id in categories:
+            root = category.parent_id
+            bucket = parts.setdefault(root, {})
+            bucket[category.id] = bucket.get(category.id, Decimal("0")) + Decimal(str(txn.amount))
+        else:
+            root = txn.category_id or ""
+        totals[root] = totals.get(root, Decimal("0")) + Decimal(str(txn.amount))
     slices = []
     for category_id, amount in sorted(totals.items(), key=lambda item: item[1], reverse=True):
         category = categories.get(category_id)
         percent = float((amount / grand) * 100) if grand else 0
+        children = []
+        for child_id, child_amount in sorted(parts.get(category_id, {}).items(), key=lambda item: item[1], reverse=True):
+            child = categories.get(child_id)
+            if child is None:
+                continue
+            children.append(
+                {
+                    "category_id": child.id,
+                    "name": child.name,
+                    "icon": child.icon,
+                    "color": child.color,
+                    "amount": money(child_amount),
+                    "percent": round(float((child_amount / amount) * 100), 1) if amount else 0,
+                }
+            )
         slices.append(
             {
                 "category_id": None if category_id in {"", "__fee__"} else category_id,
@@ -370,6 +570,7 @@ def insights(db: Session, user: User, month_value: str | None) -> dict:
                 "color": "#9CA3AF" if category_id == "__fee__" else (category.color if category else "#9CA3AF"),
                 "amount": money(amount),
                 "percent": round(percent, 1),
+                "children": children,
             }
         )
     label = start_d.strftime("%B %Y")

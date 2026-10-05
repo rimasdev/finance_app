@@ -91,6 +91,16 @@ def _ensure_user_columns() -> None:
             statements.append("ALTER TABLE transactions ADD COLUMN fx_amount NUMERIC(14, 2)")
         if "recurring_id" not in txn_columns:
             statements.append("ALTER TABLE transactions ADD COLUMN recurring_id VARCHAR(36)")
+        if "payment_type" not in txn_columns:
+            statements.append("ALTER TABLE transactions ADD COLUMN payment_type VARCHAR(40) DEFAULT 'Cash'")
+        if "warranty" not in txn_columns:
+            statements.append("ALTER TABLE transactions ADD COLUMN warranty VARCHAR(80) DEFAULT ''")
+        if "clear_status" not in txn_columns:
+            statements.append("ALTER TABLE transactions ADD COLUMN clear_status VARCHAR(20) DEFAULT 'cleared'")
+        if "place" not in txn_columns:
+            statements.append("ALTER TABLE transactions ADD COLUMN place VARCHAR(160) DEFAULT ''")
+        if "photo" not in txn_columns:
+            statements.append("ALTER TABLE transactions ADD COLUMN photo VARCHAR(400) DEFAULT ''")
     if "categories" in inspector.get_table_names():
         category_columns = {column["name"] for column in inspector.get_columns("categories")}
         if "parent_id" not in category_columns:

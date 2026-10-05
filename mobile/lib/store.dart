@@ -33,6 +33,8 @@ class FolioStore extends ChangeNotifier {
   TimelineData? timeline;
   List<AccountModel> accounts = [];
   List<CategoryModel> categories = [];
+  List<PayeeModel> payees = [];
+  Set<String> hiddenPayees = {};
   List<BudgetModel> budgets = [];
   List<LoanModel> loans = [];
   List<RecurringModel> recurring = [];
@@ -57,6 +59,9 @@ class FolioStore extends ChangeNotifier {
     if (saved != null && saved.isNotEmpty) api.baseUrl = saved;
     token = prefs.getString('token');
     showRecurringHome = prefs.getBool('showRecurringHome') ?? true;
+    hiddenPayees = {
+      for (final name in prefs.getStringList('hiddenPayees') ?? const <String>[]) name.toLowerCase(),
+    };
     api.token = token;
     if (token != null) {
       try {
@@ -274,6 +279,15 @@ class FolioStore extends ChangeNotifier {
         for (final row in recurringRows)
           RecurringModel.fromJson(row as Map<String, dynamic>),
       ];
+      List<dynamic> payeeRows = const [];
+      try {
+        payeeRows = await api.get('/payees') as List;
+      } on ApiException catch (error) {
+        if (error.status != 404) rethrow;
+      }
+      payees = [
+        for (final row in payeeRows) PayeeModel.fromJson(row as Map<String, dynamic>),
+      ];
       syncedAt = DateTime.now();
     } on ApiException catch (error) {
       lastError = error.message;
@@ -362,6 +376,47 @@ class FolioStore extends ChangeNotifier {
       'parent_id': ?parentId,
     });
     await refresh();
+  }
+
+  Future<void> savePayee(String name, String detail) async {
+    final created = await api.post('/payees', {'name': name.trim(), 'detail': detail.trim()});
+    if (created is Map<String, dynamic>) {
+      final model = PayeeModel.fromJson(created);
+      hiddenPayees.remove(model.label.toLowerCase());
+      hiddenPayees.remove(model.name.toLowerCase());
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList('hiddenPayees', hiddenPayees.toList());
+      payees = [
+        for (final row in payees)
+          if (row.id != model.id) row,
+        model,
+      ]..sort((a, b) => a.label.toLowerCase().compareTo(b.label.toLowerCase()));
+      notifyListeners();
+    }
+  }
+
+  Future<void> deletePayeeLabel(String label) async {
+    final key = label.trim().toLowerCase();
+    if (key.isEmpty) return;
+    hiddenPayees.add(key);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList('hiddenPayees', hiddenPayees.toList());
+    final matches = [
+      for (final row in payees)
+        if (row.label.toLowerCase() == key || row.name.toLowerCase() == key) row,
+    ];
+    payees = [
+      for (final row in payees)
+        if (!matches.any((match) => match.id == row.id)) row,
+    ];
+    notifyListeners();
+    for (final row in matches) {
+      try {
+        await api.delete('/payees/${row.id}');
+      } on ApiException catch (error) {
+        if (error.status != 404) rethrow;
+      }
+    }
   }
 
   Future<void> deleteCategory(String id) async {

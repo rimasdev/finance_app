@@ -30,6 +30,10 @@ IconData iconFor(String key) {
       return Icons.work_rounded;
     case 'transfer':
       return Icons.swap_horiz_rounded;
+    case 'phone':
+      return Icons.phone_iphone_rounded;
+    case 'subscriptions':
+      return Icons.subscriptions_rounded;
     case 'salary':
       return Icons.payments_rounded;
     case 'business':

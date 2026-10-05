@@ -784,14 +784,16 @@ def test_category_budget_includes_subcategories(client):
         headers=headers,
         json={"name": "Cash", "type": "cash", "opening_balance": 5000},
     ).json()
-    groceries = next(row for row in client.get("/categories", headers=headers).json() if row["name"] == "Groceries")
-    child = client.post(
-        "/categories",
-        headers=headers,
-        json={"name": "Vegetables", "kind": "expense", "parent_id": groceries["id"], "icon": "groceries"},
-    )
-    assert child.status_code == 200, child.text
-    assert child.json()["parent_id"] == groceries["id"]
+    rows = client.get("/categories", headers=headers).json()
+    groceries = next(row for row in rows if row["name"] == "Groceries")
+    child = next(row for row in rows if row["name"] == "Vegetables")
+    spices = next(row for row in rows if row["name"] == "Spices")
+    assert child["parent_id"] == groceries["id"]
+    assert spices["parent_id"] == groceries["id"]
+    utilities = next(row for row in rows if row["name"] == "Utilities")
+    phone = next(row for row in rows if row["name"] == "Phone")
+    assert phone["parent_id"] == utilities["id"]
+    assert not any(row["name"] in {"Hutch", "Dialog", "Mobitel"} for row in rows)
     created = client.post(
         "/budgets",
         headers=headers,
@@ -812,13 +814,27 @@ def test_category_budget_includes_subcategories(client):
             "direction": "expense",
             "amount": 250,
             "merchant": "Keells",
-            "category_id": child.json()["id"],
+            "category_id": child["id"],
         },
     )
     budgets = client.get("/budgets", headers=headers).json()
     groceries_budget = next(row for row in budgets if row["category_id"] == groceries["id"])
     assert groceries_budget["spent"] == 250
     assert groceries_budget["remaining"] == 9750
+    insights = client.get("/insights", headers=headers).json()
+    groceries_slice = next(row for row in insights["slices"] if row["name"] == "Groceries")
+    assert groceries_slice["amount"] == 250
+    assert groceries_slice["children"][0]["name"] == "Vegetables"
+    payees = client.get("/payees", headers=headers).json()
+    assert {row["name"] for row in payees} >= {"Hutch", "Dialog", "Mobitel"}
+    first = client.post("/payees", headers=headers, json={"name": "Dialog", "detail": "0771111111"})
+    second = client.post("/payees", headers=headers, json={"name": "Dialog", "detail": "0772222222"})
+    assert first.status_code == 200 and second.status_code == 200
+    assert first.json()["label"] == "Dialog · 0771111111"
+    assert first.json()["id"] != second.json()["id"]
+    saved = client.get("/payees", headers=headers).json()
+    assert sum(1 for row in saved if row["name"] == "Dialog" and row["detail"]) == 2
+    assert any(row["name"] == "Keells" and row["detail"] == "" for row in saved)
 
 
 def test_deleting_a_recorded_payment_brings_the_subscription_back(client):

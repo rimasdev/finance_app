@@ -1,5 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 
 import '../banks.dart';
@@ -11,6 +15,32 @@ import '../store.dart';
 import '../subscriptions.dart';
 import '../theme.dart';
 import '../widgets.dart';
+import 'payee_screen.dart';
+
+class _CategoryGroup {
+  _CategoryGroup(this.parent, this.children);
+
+  final CategoryModel parent;
+  final List<CategoryModel> children;
+}
+
+List<_CategoryGroup> _categoryGroups(Iterable<CategoryModel> categories) {
+  final list = categories.toList();
+  final known = {for (final category in list) category.id};
+  final children = <String, List<CategoryModel>>{};
+  final parents = <CategoryModel>[];
+  for (final category in list) {
+    final parentId = category.parentId;
+    if (parentId != null && parentId.isNotEmpty && known.contains(parentId)) {
+      children.putIfAbsent(parentId, () => []).add(category);
+    } else {
+      parents.add(category);
+    }
+  }
+  return [
+    for (final parent in parents) _CategoryGroup(parent, children[parent.id] ?? const []),
+  ];
+}
 
 class TransactionFormScreen extends StatefulWidget {
   const TransactionFormScreen({super.key, this.existing});
@@ -41,6 +71,11 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
   bool _hidden = false;
   bool _details = false;
   final List<String> _tags = [];
+  String _paymentType = 'Cash';
+  String _warranty = '';
+  String _clearStatus = 'cleared';
+  String _place = '';
+  String _photo = '';
   String? _repeatKind;
   String? _provider;
   int _installments = 12;
@@ -69,6 +104,11 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
     _merchant.text = existing.merchant;
     _note.text = existing.note;
     _tags.addAll(existing.tags);
+    _paymentType = existing.paymentType;
+    _warranty = existing.warranty;
+    _clearStatus = existing.clearStatus;
+    _place = existing.place;
+    _photo = existing.photo;
     if (existing.bankCharge > 0) {
       _charge.text = existing.bankCharge.toStringAsFixed(2);
     }
@@ -150,6 +190,10 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
       showError(context, Exception('Pick a different account to transfer to'));
       return;
     }
+    if (_direction != 'transfer' && (_categoryId == null || _categoryId!.isEmpty)) {
+      showError(context, Exception('Choose a category'));
+      return;
+    }
     if (charge < 0) {
       showError(context, Exception('Bank charges cannot be negative'));
       return;
@@ -164,6 +208,11 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
           : description,
       'note': _note.text.trim(),
       'tags': _tags.join(', '),
+      'payment_type': _paymentType,
+      'warranty': _warranty,
+      'clear_status': _clearStatus,
+      'place': _place,
+      'photo': _photo,
       'occurred_at': _when.toUtc().toIso8601String(),
       'scope': _business ? 'business' : 'personal',
       'hidden': _hidden,
@@ -210,30 +259,8 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
       if (preset == null) _tag.clear();
       return;
     }
-    setState(() {
-      _tags.add(tag);
-      if (preset == null) _tag.clear();
-    });
-  }
-
-  List<String> _shopNames(FolioStore store) {
-    final seen = <String>{};
-    final names = <String>[];
-    void add(String raw) {
-      final name = raw.trim();
-      if (name.isEmpty || name.toLowerCase() == 'transfer') return;
-      if (!seen.add(name.toLowerCase())) return;
-      names.add(name);
-    }
-    for (final day in store.timeline?.days ?? const <TimelineDay>[]) {
-      for (final txn in day.items) {
-        add(txn.merchant);
-      }
-    }
-    for (final txn in store.review) {
-      add(txn.merchant);
-    }
-    return names;
+    _tags.add(tag);
+    if (preset == null) _tag.clear();
   }
 
   List<String> _knownTags(FolioStore store) {
@@ -279,28 +306,10 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
   }
 
   Future<void> _addCategory(String kind) async {
-    final name = TextEditingController();
     final created = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: FolioColors.card,
-        title: const Text('New category'),
-        content: TextField(
-          controller: name,
-          autofocus: true,
-          textCapitalization: TextCapitalization.words,
-          decoration: const InputDecoration(hintText: 'Groceries, Spices, Shopping'),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          TextButton(
-            onPressed: () => Navigator.pop(context, name.text.trim()),
-            child: const Text('Add'),
-          ),
-        ],
-      ),
+      builder: (context) => const _TextPrompt(title: 'New category', hint: 'Groceries, Spices, Shopping'),
     );
-    name.dispose();
     if (created == null || created.isEmpty || !mounted) return;
     setState(() => _busy = true);
     try {
@@ -579,170 +588,25 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
 
   Future<void> _openCategoryTray(FolioStore store, String kind) async {
     final categories = store.categories.where((category) => category.kind == kind).toList();
-    await showModalBottomSheet<void>(
+    final picked = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
       backgroundColor: FolioColors.bg,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
       ),
-      builder: (context) {
-        final height = MediaQuery.sizeOf(context).height * 0.62;
-        final budget = _budgetFor(store, _categoryId);
-        return SizedBox(
-          height: height,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const SizedBox(height: 10),
-              Center(
-                child: Container(
-                  width: 36,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: FolioColors.line,
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                ),
-              ),
-              const Padding(
-                padding: EdgeInsets.fromLTRB(20, 16, 20, 4),
-                child: Text('Category', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-              ),
-              if (budget != null)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
-                  child: Text(
-                    '${money(budget.remaining)} left of ${money(budget.limitAmount)}',
-                    style: TextStyle(
-                      color: budget.remaining < 0 ? FolioColors.red : FolioColors.muted,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              const SizedBox(height: 8),
-              Expanded(
-                child: ListView(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-                  children: [
-                    for (final category in categories) ...[
-                      _CategoryRow(
-                        icon: iconFor(category.icon),
-                        label: category.name,
-                        color: colorFromHex(category.color),
-                        selected: category.id == _categoryId,
-                        onTap: () {
-                          setState(() {
-                            _categoryId = _categoryId == category.id ? null : category.id;
-                          });
-                          Navigator.pop(context);
-                        },
-                      ),
-                      const SizedBox(height: 8),
-                    ],
-                    _CategoryRow(
-                      icon: Icons.add_rounded,
-                      label: 'Add a category',
-                      color: FolioColors.muted,
-                      selected: false,
-                      onTap: _busy
-                          ? () {}
-                          : () async {
-                              Navigator.pop(context);
-                              await _addCategory(kind);
-                            },
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Future<void> _openTagTray(FolioStore store) async {
-    final knownTags = _knownTags(store);
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: FolioColors.bg,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
-      ),
-      builder: (context) => Padding(
-        padding: EdgeInsets.fromLTRB(16, 12, 16, 16 + MediaQuery.viewInsetsOf(context).bottom),
-        child: StatefulBuilder(
-          builder: (context, setSheet) {
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('Tag', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-                const SizedBox(height: 12),
-                if (_tags.isNotEmpty)
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      for (final tag in _tags)
-                        InputChip(
-                          label: Text(tag),
-                          backgroundColor: const Color(0xFF3A3C44),
-                          side: BorderSide.none,
-                          onDeleted: () {
-                            setState(() => _tags.remove(tag));
-                            setSheet(() {});
-                          },
-                        ),
-                    ],
-                  ),
-                if (knownTags.any((tag) => !_tags.any((item) => item.toLowerCase() == tag.toLowerCase()))) ...[
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      for (final tag in knownTags)
-                        if (!_tags.any((item) => item.toLowerCase() == tag.toLowerCase()))
-                          _PlainTag(
-                            label: tag,
-                            selected: false,
-                            onTap: () {
-                              _addTag(tag);
-                              setSheet(() {});
-                            },
-                          ),
-                    ],
-                  ),
-                ],
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _tag,
-                  textCapitalization: TextCapitalization.words,
-                  textInputAction: TextInputAction.done,
-                  onSubmitted: (_) {
-                    _addTag();
-                    setSheet(() {});
-                  },
-                  decoration: InputDecoration(
-                    hintText: 'Create a tag',
-                    suffixIcon: IconButton(
-                      onPressed: () {
-                        _addTag();
-                        setSheet(() {});
-                      },
-                      icon: const Icon(Icons.add),
-                    ),
-                  ),
-                ),
-              ],
-            );
-          },
-        ),
+      builder: (context) => _CategorySheet(
+        categories: categories,
+        selectedId: _categoryId,
+        budget: _budgetFor(store, _categoryId),
       ),
     );
+    if (!mounted || picked == null) return;
+    if (picked == '__add__') {
+      await _addCategory(kind);
+      return;
+    }
+    setState(() => _categoryId = picked);
   }
 
   Future<void> _openNoteTray() async {
@@ -775,6 +639,124 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
     if (mounted) setState(() {});
   }
 
+  String get _whenLabel {
+    final now = DateTime.now();
+    final today = now.year == _when.year && now.month == _when.month && now.day == _when.day;
+    if (today) return 'Today, ${clock(_when)}';
+    return stamp(_when);
+  }
+
+  String get _statusLabel => switch (_clearStatus) {
+    'reconciled' => 'Reconciled',
+    'uncleared' => 'Uncleared',
+    _ => 'Cleared',
+  };
+
+  Future<void> _openLabels(FolioStore store) async {
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (context) => _LabelsPage(
+          tags: _tags,
+          known: _knownTags(store),
+          onCreate: _addTag,
+          onRemove: (name) {
+            _tags.removeWhere((item) => item.toLowerCase() == name.toLowerCase());
+          },
+        ),
+      ),
+    );
+    if (!mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  Future<void> _openPayee(FolioStore store) async {
+    final picked = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (context) => PayeePickerScreen(store: store, current: _merchant.text.trim())),
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      _location = picked;
+      _merchant.text = picked;
+    });
+  }
+
+  Future<void> _openPaymentType() async {
+    final picked = await _pickLine('Payment type', const ['Cash', 'Card', 'Bank transfer', 'Online'], _paymentType);
+    if (picked != null) setState(() => _paymentType = picked);
+  }
+
+  Future<void> _openWarranty() async {
+    final current = _warranty.isEmpty ? 'None' : _warranty;
+    final picked = await _pickLine('Warranty', const ['None', '6 months', '1 year', '2 years', '3 years'], current);
+    if (picked != null) setState(() => _warranty = picked == 'None' ? '' : picked);
+  }
+
+  Future<void> _openStatus() async {
+    final picked = await _pickLine('Status', const ['Reconciled', 'Cleared', 'Uncleared'], _statusLabel);
+    if (picked == null) return;
+    setState(() {
+      _clearStatus = switch (picked) {
+        'Reconciled' => 'reconciled',
+        'Uncleared' => 'uncleared',
+        _ => 'cleared',
+      };
+    });
+  }
+
+  Future<String?> _pickLine(String title, List<String> options, String selected) {
+    return Navigator.push<String>(
+      context,
+      MaterialPageRoute(
+        builder: (context) => Scaffold(
+          appBar: AppBar(
+            leading: IconButton(
+              onPressed: () => Navigator.pop(context),
+              icon: const Icon(Icons.arrow_back_rounded),
+            ),
+            title: Text(title),
+          ),
+          body: ListView(
+            children: [
+              for (final option in options)
+                ListTile(
+                  title: Text(option),
+                  trailing: option == selected
+                      ? const Icon(Icons.check_rounded, color: Color(0xFF7EB6FF))
+                      : null,
+                  onTap: () => Navigator.pop(context, option),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openPlace() async {
+    final saved = await showDialog<String>(
+      context: context,
+      builder: (context) => _TextPrompt(title: 'Location', hint: 'Place, optional', initial: _place, action: 'Save'),
+    );
+    if (saved == null || !mounted) return;
+    setState(() => _place = saved);
+  }
+
+  Future<void> _attachPhoto() async {
+    final picked = await ImagePicker().pickImage(source: ImageSource.gallery, maxWidth: 1600, imageQuality: 80);
+    if (picked == null || !mounted) return;
+    final dir = await getApplicationDocumentsDirectory();
+    final folder = Directory('${dir.path}/receipts');
+    if (!folder.existsSync()) folder.createSync(recursive: true);
+    final dest = File('${folder.path}/${DateTime.now().millisecondsSinceEpoch}.jpg');
+    await File(picked.path).copy(dest.path);
+    if (!mounted) return;
+    setState(() => _photo = dest.path);
+  }
+
   String get _repeatLabel {
     final payment = _provider == null || _provider!.isEmpty ? '' : ' · $_provider';
     return switch (_repeatKind) {
@@ -788,10 +770,6 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
   @override
   Widget build(BuildContext context) {
     final store = context.watch<FolioStore>();
-    if (_accountId == null && store.accounts.isNotEmpty) {
-      _accountId = store.accounts.first.id;
-      _business = store.accounts.first.isBusiness;
-    }
     final editing = widget.existing != null;
     final foreign = _currency != 'LKR' && _fxAmount != null;
     final kind = _direction == 'income' ? 'income' : 'expense';
@@ -800,7 +778,6 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
     final leftAfter = categoryBudget == null || _direction != 'expense' || editing
         ? null
         : categoryBudget.remaining - typedAmount;
-    final shops = _direction == 'transfer' ? const <String>[] : _shopNames(store);
     final account = store.accounts.where((item) => item.id == _accountId).firstOrNull;
     final destination = store.accounts.where((item) => item.id == _transferId).firstOrNull;
     final category = store.categories.where((item) => item.id == _categoryId).firstOrNull;
@@ -877,42 +854,22 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
               ),
             ),
           ],
-          const SizedBox(height: 8),
-          TextField(
-            controller: _merchant,
-            onChanged: (value) => _location = value,
-            textAlign: TextAlign.center,
-            textCapitalization: TextCapitalization.words,
-            decoration: InputDecoration(
-              hintText: _direction == 'transfer' ? 'Description, optional' : 'Location, optional',
-              fillColor: Colors.transparent,
-              contentPadding: EdgeInsets.zero,
-            ),
-          ),
-          if (shops.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            SizedBox(
-              height: 36,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: shops.length,
-                separatorBuilder: (_, _) => const SizedBox(width: 8),
-                itemBuilder: (context, index) {
-                  final shop = shops[index];
-                  final selected = shop.toLowerCase() == _merchant.text.trim().toLowerCase();
-                  return _PlainTag(
-                    label: shop,
-                    selected: selected,
-                    onTap: () => setState(() {
-                      _location = shop;
-                      _merchant.text = shop;
-                    }),
-                  );
-                },
+          if (_direction == 'transfer') ...[
+            const SizedBox(height: 8),
+            TextField(
+              controller: _merchant,
+              onChanged: (value) => _location = value,
+              textAlign: TextAlign.center,
+              textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(
+                hintText: 'Description, optional',
+                fillColor: Colors.transparent,
+                contentPadding: EdgeInsets.zero,
               ),
             ),
           ],
           const SizedBox(height: 18),
+          const _SectionLabel('General'),
           if (store.accounts.isEmpty)
             const Text(
               'Add an account first.',
@@ -921,26 +878,6 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
           else
             _PayList(
               children: [
-                if (editing && _direction == 'expense')
-                  _PayRow(
-                    tooltip: 'Subscription',
-                    icon: Icons.event_repeat_rounded,
-                    color: const Color(0xFF8ED4B0),
-                    label: 'Subscription',
-                    value: store.recurring.where((item) => item.id == _recurringId).firstOrNull?.name ?? 'Not linked',
-                    filled: _recurringId.isNotEmpty,
-                    onTap: () => _pickSubscription(store),
-                  ),
-                if (_direction != 'transfer')
-                  _PayRow(
-                    tooltip: 'Category',
-                    icon: category == null ? Icons.category_rounded : iconFor(category.icon),
-                    color: category == null ? const Color(0xFFC5D7F6) : colorFromHex(category.color),
-                    label: 'Category',
-                    value: category?.name ?? 'Choose',
-                    filled: category != null,
-                    onTap: () => _openCategoryTray(store, kind),
-                  ),
                 if (_direction == 'transfer') ...[
                   _PayRow(
                     tooltip: 'From account',
@@ -963,40 +900,131 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
                 ] else
                   _PayRow(
                     tooltip: 'Account',
-                    icon: Icons.account_balance_wallet_rounded,
-                    color: const Color(0xFF8ED4B0),
+                    icon: Icons.help_outline_rounded,
+                    color: const Color(0xFF9B9BA6),
                     label: 'Account',
-                    value: account?.name ?? 'Choose',
+                    value: account?.name ?? 'Required',
                     filled: account != null,
+                    valueColor: account == null ? FolioColors.red : null,
                     onTap: () => _pickAccount(store, destination: false),
                   ),
+                if (editing && _direction == 'expense')
+                  _PayRow(
+                    tooltip: 'Subscription',
+                    icon: Icons.event_repeat_rounded,
+                    color: const Color(0xFF8ED4B0),
+                    label: 'Subscription',
+                    value: store.recurring.where((item) => item.id == _recurringId).firstOrNull?.name ?? 'Not linked',
+                    filled: _recurringId.isNotEmpty,
+                    onTap: () => _pickSubscription(store),
+                  ),
+                if (_direction != 'transfer')
+                  _PayRow(
+                    tooltip: 'Category',
+                    icon: category == null ? Icons.help_outline_rounded : iconFor(category.icon),
+                    color: category == null ? const Color(0xFF9B9BA6) : colorFromHex(category.color),
+                    label: 'Category',
+                    value: category?.name ?? 'Required',
+                    filled: category != null,
+                    valueColor: category == null ? FolioColors.red : null,
+                    onTap: () => _openCategoryTray(store, kind),
+                  ),
                 _PayRow(
-                  tooltip: 'Date',
+                  tooltip: 'Date and time',
                   icon: Icons.calendar_today_rounded,
                   color: const Color(0xFFE7C27A),
-                  label: 'Date',
-                  value: stamp(_when),
+                  label: 'Date & Time',
+                  value: _whenLabel,
                   filled: true,
                   onTap: _openDateTray,
                 ),
                 _PayRow(
-                  tooltip: 'Tag',
-                  icon: Icons.sell_rounded,
-                  color: const Color(0xFFF0A0A0),
-                  label: 'Tag',
-                  value: _tags.isEmpty ? 'None' : _tags.join(', '),
+                  tooltip: 'Labels',
+                  icon: Icons.sell_outlined,
+                  color: const Color(0xFF9B9BA6),
+                  label: 'Labels',
+                  value: _tags.isEmpty ? '' : _tags.join(', '),
                   filled: _tags.isNotEmpty,
-                  onTap: () => _openTagTray(store),
+                  onTap: () => _openLabels(store),
                 ),
+              ],
+            ),
+          const SizedBox(height: 18),
+          const _SectionLabel('More detail'),
+          if (store.accounts.isNotEmpty)
+            _PayList(
+              children: [
                 _PayRow(
                   tooltip: 'Note',
-                  icon: Icons.sticky_note_2_rounded,
-                  color: const Color(0xFFC4B5FD),
+                  icon: Icons.edit_outlined,
+                  color: const Color(0xFF9B9BA6),
                   label: 'Note',
-                  value: _note.text.trim().isEmpty ? 'Add' : _note.text.trim(),
+                  value: _note.text.trim().isEmpty ? '' : _note.text.trim(),
                   filled: _note.text.trim().isNotEmpty,
                   onTap: _openNoteTray,
                 ),
+                if (_direction != 'transfer')
+                  _PayRow(
+                    tooltip: 'Payee',
+                    icon: Icons.person_outline_rounded,
+                    color: const Color(0xFF9B9BA6),
+                    label: 'Payee',
+                    value: _merchant.text.trim(),
+                    filled: _merchant.text.trim().isNotEmpty,
+                    onTap: () => _openPayee(store),
+                  ),
+                if (_direction != 'transfer')
+                  _PayRow(
+                    tooltip: 'Payment type',
+                    icon: Icons.credit_card_rounded,
+                    color: const Color(0xFF9B9BA6),
+                    label: 'Payment type',
+                    value: _paymentType,
+                    filled: true,
+                    onTap: _openPaymentType,
+                  ),
+                if (_direction != 'transfer')
+                  _PayRow(
+                    tooltip: 'Warranty',
+                    icon: Icons.shield_outlined,
+                    color: const Color(0xFF9B9BA6),
+                    label: 'Warranty',
+                    value: _warranty.isEmpty ? 'None' : _warranty,
+                    filled: true,
+                    onTap: _openWarranty,
+                  ),
+                if (_direction != 'transfer')
+                  _PayRow(
+                    tooltip: 'Status',
+                    icon: Icons.hourglass_bottom_rounded,
+                    color: const Color(0xFF9B9BA6),
+                    label: 'Status',
+                    value: _statusLabel,
+                    filled: true,
+                    onTap: _openStatus,
+                  ),
+                if (_direction != 'transfer')
+                  _PayRow(
+                    tooltip: 'Location',
+                    icon: Icons.location_on_rounded,
+                    color: const Color(0xFF3B82F6),
+                    label: _place.isEmpty ? 'Add location' : 'Location',
+                    labelColor: _place.isEmpty ? const Color(0xFF3B82F6) : null,
+                    value: _place,
+                    filled: _place.isNotEmpty,
+                    onTap: _openPlace,
+                  ),
+                if (_direction != 'transfer')
+                  _PayRow(
+                    tooltip: 'Photo',
+                    icon: Icons.photo_camera_outlined,
+                    color: const Color(0xFF3B82F6),
+                    label: _photo.isEmpty ? 'Attach photo' : 'Photo',
+                    labelColor: _photo.isEmpty ? const Color(0xFF3B82F6) : null,
+                    value: _photo.isEmpty ? '' : 'Attached',
+                    filled: _photo.isNotEmpty,
+                    onTap: _attachPhoto,
+                  ),
                 if (widget.existing == null && _direction != 'transfer')
                   _PayRow(
                     tooltip: _repeatLabel,
@@ -1037,10 +1065,10 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
             const SizedBox(height: 8),
             Text(
               _repeatKind == 'installment'
-                  ? 'Also saved as $_installments monthly ${_provider ?? ''} installments for this shop, starting next month.'
+                  ? 'Also saved as $_installments monthly ${_provider ?? ''} installments for this payee, starting next month.'
                   : _repeatKind == 'subscription'
                   ? 'Also saved as a monthly subscription, starting next month.'
-                  : 'Also saved as a monthly ${_provider ?? ''} repeat for this shop, starting next month.',
+                  : 'Also saved as a monthly ${_provider ?? ''} repeat for this payee, starting next month.',
               style: const TextStyle(color: FolioColors.muted, fontSize: 13),
             ),
           ],
@@ -1087,35 +1115,6 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
   }
 }
 
-class _PlainTag extends StatelessWidget {
-  const _PlainTag({required this.label, required this.selected, required this.onTap});
-
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-        decoration: BoxDecoration(
-          color: selected ? const Color(0xFF3A3C44) : Colors.transparent,
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            color: selected ? FolioColors.text : FolioColors.muted,
-            fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _PayList extends StatelessWidget {
   const _PayList({required this.children});
 
@@ -1142,6 +1141,28 @@ class _PayList extends StatelessWidget {
   }
 }
 
+class _SectionLabel extends StatelessWidget {
+  const _SectionLabel(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+      child: Text(
+        text.toUpperCase(),
+        style: const TextStyle(
+          color: FolioColors.muted,
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.6,
+        ),
+      ),
+    );
+  }
+}
+
 class _PayRow extends StatelessWidget {
   const _PayRow({
     required this.tooltip,
@@ -1151,6 +1172,8 @@ class _PayRow extends StatelessWidget {
     required this.value,
     required this.filled,
     required this.onTap,
+    this.valueColor,
+    this.labelColor,
   });
 
   final String tooltip;
@@ -1160,11 +1183,13 @@ class _PayRow extends StatelessWidget {
   final String value;
   final bool filled;
   final VoidCallback onTap;
+  final Color? valueColor;
+  final Color? labelColor;
 
   @override
   Widget build(BuildContext context) {
-    return Tooltip(
-      message: tooltip,
+    return Semantics(
+      label: tooltip,
       child: InkWell(
         onTap: onTap,
         child: Padding(
@@ -1182,7 +1207,7 @@ class _PayRow extends StatelessWidget {
                 child: Icon(icon, size: 22, color: color),
               ),
               const SizedBox(width: 14),
-              Text(label, style: const TextStyle(fontWeight: FontWeight.w600)),
+              Text(label, style: TextStyle(fontWeight: FontWeight.w600, color: labelColor)),
               const SizedBox(width: 12),
               Expanded(
                 child: Text(
@@ -1191,11 +1216,12 @@ class _PayRow extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   textAlign: TextAlign.end,
                   style: TextStyle(
-                    color: filled ? FolioColors.text : FolioColors.muted,
+                    color: valueColor ?? (filled ? FolioColors.text : FolioColors.muted),
                     fontWeight: filled ? FontWeight.w600 : FontWeight.w500,
                   ),
                 ),
               ),
+              const Icon(Icons.chevron_right_rounded, color: FolioColors.muted, size: 20),
             ],
           ),
         ),
@@ -1785,6 +1811,296 @@ class ThousandsInputFormatter extends TextInputFormatter {
     return TextEditingValue(
       text: text,
       selection: TextSelection.collapsed(offset: offset.clamp(0, text.length)),
+    );
+  }
+}
+
+class _CategorySheet extends StatefulWidget {
+  const _CategorySheet({required this.categories, required this.selectedId, required this.budget});
+
+  final List<CategoryModel> categories;
+  final String? selectedId;
+  final BudgetModel? budget;
+
+  @override
+  State<_CategorySheet> createState() => _CategorySheetState();
+}
+
+class _CategorySheetState extends State<_CategorySheet> {
+  final _query = TextEditingController();
+
+  @override
+  void dispose() {
+    _query.dispose();
+    super.dispose();
+  }
+
+  List<_CategoryGroup> get _visible {
+    final query = _query.text.trim().toLowerCase();
+    final groups = <_CategoryGroup>[];
+    for (final group in _categoryGroups(widget.categories)) {
+      if (query.isEmpty) {
+        groups.add(group);
+        continue;
+      }
+      final parentHit = group.parent.name.toLowerCase().contains(query);
+      final children = [
+        for (final child in group.children)
+          if (parentHit || child.name.toLowerCase().contains(query)) child,
+      ];
+      if (parentHit || children.isNotEmpty) groups.add(_CategoryGroup(group.parent, children));
+    }
+    return groups;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final budget = widget.budget;
+    final groups = _visible;
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+      child: SizedBox(
+        height: MediaQuery.sizeOf(context).height * 0.78,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 10),
+            Center(
+              child: Container(
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(color: FolioColors.line, borderRadius: BorderRadius.circular(4)),
+              ),
+            ),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 16, 20, 8),
+              child: Text('Category', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: TextField(
+                controller: _query,
+                autofocus: true,
+                textCapitalization: TextCapitalization.words,
+                onChanged: (_) => setState(() {}),
+                decoration: const InputDecoration(
+                  hintText: 'Search categories',
+                  prefixIcon: Icon(Icons.search),
+                ),
+              ),
+            ),
+            if (budget != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
+                child: Text(
+                  '${money(budget.remaining)} left of ${money(budget.limitAmount)}',
+                  style: TextStyle(
+                    color: budget.remaining < 0 ? FolioColors.red : FolioColors.muted,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                children: [
+                  for (final group in groups) ...[
+                    if (group.children.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(4, 10, 4, 6),
+                        child: Text(
+                          group.parent.name,
+                          style: const TextStyle(color: FolioColors.muted, fontWeight: FontWeight.w700, fontSize: 12),
+                        ),
+                      ),
+                    _CategoryRow(
+                      icon: iconFor(group.parent.icon),
+                      label: group.parent.name,
+                      color: colorFromHex(group.parent.color),
+                      selected: group.parent.id == widget.selectedId,
+                      onTap: () => Navigator.pop(context, group.parent.id),
+                    ),
+                    for (final child in group.children) ...[
+                      const SizedBox(height: 8),
+                      Padding(
+                        padding: const EdgeInsets.only(left: 18),
+                        child: _CategoryRow(
+                          icon: iconFor(child.icon),
+                          label: child.name,
+                          color: colorFromHex(child.color),
+                          selected: child.id == widget.selectedId,
+                          onTap: () => Navigator.pop(context, child.id),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                  ],
+                  if (groups.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Text('No categories match', style: TextStyle(color: FolioColors.muted)),
+                    ),
+                  _CategoryRow(
+                    icon: Icons.add_rounded,
+                    label: 'Add a category',
+                    color: FolioColors.muted,
+                    selected: false,
+                    onTap: () => Navigator.pop(context, '__add__'),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TextPrompt extends StatefulWidget {
+  const _TextPrompt({
+    required this.title,
+    required this.hint,
+    this.initial = '',
+    this.action = 'Add',
+    this.keyboard,
+  });
+
+  final String title;
+  final String hint;
+  final String initial;
+  final String action;
+  final TextInputType? keyboard;
+
+  @override
+  State<_TextPrompt> createState() => _TextPromptState();
+}
+
+class _TextPromptState extends State<_TextPrompt> {
+  late final TextEditingController _field = TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _field.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: FolioColors.card,
+      title: Text(widget.title),
+      content: TextField(
+        controller: _field,
+        autofocus: true,
+        keyboardType: widget.keyboard,
+        textCapitalization: widget.keyboard == null ? TextCapitalization.words : TextCapitalization.none,
+        decoration: InputDecoration(hintText: widget.hint),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+        TextButton(onPressed: () => Navigator.pop(context, _field.text.trim()), child: Text(widget.action)),
+      ],
+    );
+  }
+}
+
+class _LabelsPage extends StatefulWidget {
+  const _LabelsPage({
+    required this.tags,
+    required this.known,
+    required this.onCreate,
+    required this.onRemove,
+  });
+
+  final List<String> tags;
+  final List<String> known;
+  final ValueChanged<String> onCreate;
+  final ValueChanged<String> onRemove;
+
+  @override
+  State<_LabelsPage> createState() => _LabelsPageState();
+}
+
+class _LabelsPageState extends State<_LabelsPage> {
+  Future<void> _create() async {
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => const _TextPrompt(title: 'New label', hint: 'Rice, chicken…'),
+    );
+    if (!mounted || name == null || name.isEmpty) return;
+    widget.onCreate(name);
+    setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final all = <String>[
+      ...widget.tags,
+      for (final tag in widget.known)
+        if (!widget.tags.any((item) => item.toLowerCase() == tag.toLowerCase())) tag,
+    ];
+    return Scaffold(
+      appBar: AppBar(
+        leading: BackButton(
+          onPressed: () {
+            FocusManager.instance.primaryFocus?.unfocus();
+            Navigator.pop(context);
+          },
+        ),
+        title: const Text('Labels'),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: IconButton(
+              tooltip: 'Add label',
+              onPressed: _create,
+              icon: const Icon(Icons.add_circle, color: Color(0xFF3B82F6), size: 28),
+            ),
+          ),
+        ],
+      ),
+      body: all.isEmpty
+          ? const Center(
+              child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: 36),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.sell_rounded, size: 72, color: FolioColors.muted),
+                    SizedBox(height: 16),
+                    Text('Labels', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
+                    SizedBox(height: 8),
+                    Text(
+                      'Use Labels to organize your records better. Start with (+) to create first one.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: FolioColors.muted, height: 1.4),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          : ListView(
+              children: [
+                for (final tag in all)
+                  ListTile(
+                    title: Text(tag),
+                    trailing: widget.tags.any((item) => item.toLowerCase() == tag.toLowerCase())
+                        ? const Icon(Icons.check_rounded, color: Color(0xFF7EB6FF))
+                        : null,
+                    onTap: () {
+                      final selected = widget.tags.any((item) => item.toLowerCase() == tag.toLowerCase());
+                      if (selected) {
+                        widget.onRemove(tag);
+                      } else {
+                        widget.onCreate(tag);
+                      }
+                      setState(() {});
+                    },
+                  ),
+              ],
+            ),
     );
   }
 }
