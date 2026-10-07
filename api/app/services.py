@@ -10,23 +10,6 @@ from sqlalchemy.orm import Session
 from app.models import Account, Budget, Category, Payee, Transaction, User, utcnow
 from app.sms_parser import looks_like_withdrawal, parse_sms
 
-EXPENSE_CATEGORIES = [
-    ("Groceries", "groceries", "#8ED4B0"),
-    ("Spices", "spices", "#E7C27A"),
-    ("Shopping", "shopping", "#34D399"),
-    ("Transport", "transport", "#7EB6FF"),
-    ("Utilities", "utilities", "#F5C542"),
-    ("Health care", "health", "#FF6B6B"),
-    ("Debt payments", "debt", "#C084FC"),
-    ("Dining out", "dining", "#FB923C"),
-    ("Entertainment", "entertainment", "#F472B6"),
-    ("Personal care", "personal", "#A78BFA"),
-    ("Gifts/Donation", "gifts", "#F87171"),
-    ("Education", "education", "#60A5FA"),
-    ("Work", "work", "#E7B8A3"),
-    ("Transfers", "transfer", "#94A3B8"),
-    ("Other", "other", "#9CA3AF"),
-]
 INCOME_CATEGORIES = [
     ("Salary", "salary", "#3DDC84"),
     ("Business income", "business", "#2DD4BF"),
@@ -42,7 +25,8 @@ HOUSEHOLD_CATEGORIES = [
         "groceries",
         "#8ED4B0",
         [
-            ("Rice and staples", "groceries", "#8ED4B0"),
+            ("Fruits", "groceries", "#8ED4B0"),
+            ("Rice", "groceries", "#E7C27A"),
             ("Spices", "spices", "#E7C27A"),
             ("Daily needs", "shopping", "#8ED4B0"),
             ("Vegetables", "groceries", "#8ED4B0"),
@@ -51,7 +35,50 @@ HOUSEHOLD_CATEGORIES = [
         ],
     ),
     (
-        "Dining out",
+        "Utilities",
+        "utilities",
+        "#F5C542",
+        [
+            ("Phone", "phone", "#7EB6FF"),
+            ("Internet", "utilities", "#F5C542"),
+            ("Water", "utilities", "#7EB6FF"),
+            ("Electricity", "utilities", "#F5C542"),
+        ],
+    ),
+    (
+        "Transport",
+        "transport",
+        "#7EB6FF",
+        [
+            ("Public", "transport", "#7EB6FF"),
+            ("Taxi", "transport", "#7EB6FF"),
+        ],
+    ),
+    (
+        "Education",
+        "education",
+        "#60A5FA",
+        [
+            ("School transport", "transport", "#60A5FA"),
+            ("School accessories", "education", "#60A5FA"),
+            ("School dress", "shopping", "#60A5FA"),
+            ("School fees", "education", "#60A5FA"),
+            ("Islamic class", "education", "#60A5FA"),
+        ],
+    ),
+    (
+        "Kids",
+        "shopping",
+        "#F472B6",
+        [
+            ("Toys", "shopping", "#F472B6"),
+            ("Kids stuff", "shopping", "#F472B6"),
+        ],
+    ),
+    ("Dress", "shopping", "#E7B8A3", []),
+    ("Subscriptions", "subscriptions", "#C5D7F6", []),
+    (
+        "Day out",
         "dining",
         "#FB923C",
         [
@@ -60,42 +87,138 @@ HOUSEHOLD_CATEGORIES = [
             ("Dinner", "dining", "#FB923C"),
         ],
     ),
-    ("Outing", "entertainment", "#F472B6", []),
     (
-        "School",
-        "education",
-        "#60A5FA",
+        "Gifts",
+        "gifts",
+        "#F87171",
         [
-            ("School items", "education", "#60A5FA"),
-            ("School transport", "transport", "#60A5FA"),
-            ("Books", "education", "#60A5FA"),
+            ("Donations", "gifts", "#F87171"),
         ],
     ),
-    ("Transport", "transport", "#7EB6FF", []),
     (
-        "Utilities",
+        "Health",
+        "health",
+        "#FF6B6B",
+        [
+            ("Doctor", "health", "#FF6B6B"),
+            ("Clinic", "health", "#FF6B6B"),
+            ("Medicine", "health", "#FF6B6B"),
+            ("Haircut", "personal", "#A78BFA"),
+        ],
+    ),
+    (
+        "Membership",
+        "health",
+        "#8ED4B0",
+        [
+            ("Gym", "health", "#8ED4B0"),
+        ],
+    ),
+]
+
+# Older household names keep their transactions when the list is refreshed.
+_HOUSEHOLD_RENAMES = (
+    ("Rice and staples", "Rice"),
+    ("Dining out", "Day out"),
+    ("School items", "School accessories"),
+    ("Gifts/Donation", "Gifts"),
+    ("School", "Education"),
+)
+
+# A business month is stock, premises, and staff, not groceries or school.
+BUSINESS_EXPENSE_CATEGORIES = [
+    (
+        "Stock",
+        "shopping",
+        "#34D399",
+        [
+            ("Goods", "shopping", "#34D399"),
+            ("Packaging", "shopping", "#8ED4B0"),
+        ],
+    ),
+    (
+        "Premises",
+        "work",
+        "#E7B8A3",
+        [
+            ("Rent", "work", "#E7B8A3"),
+            ("Repairs", "work", "#E7C27A"),
+        ],
+    ),
+    (
+        "Staff",
+        "work",
+        "#C5D7F6",
+        [
+            ("Salaries", "salary", "#8ED4B0"),
+            ("Wages", "salary", "#7EB6FF"),
+        ],
+    ),
+    (
+        "Deliveries",
+        "transport",
+        "#7EB6FF",
+        [
+            ("Fuel", "transport", "#E7C27A"),
+            ("Courier", "transport", "#7EB6FF"),
+        ],
+    ),
+    (
+        "Shop bills",
         "utilities",
         "#F5C542",
         [
-            ("Electricity", "utilities", "#F5C542"),
-            ("Water", "utilities", "#7EB6FF"),
-            ("Internet", "utilities", "#F5C542"),
-            ("Phone", "phone", "#7EB6FF"),
+            ("Power", "utilities", "#F5C542"),
+            ("Water bill", "utilities", "#7EB6FF"),
+            ("Shop internet", "utilities", "#F5C542"),
+            ("Shop phone", "phone", "#7EB6FF"),
         ],
     ),
     (
-        "Subscriptions",
-        "subscriptions",
-        "#C5D7F6",
+        "Marketing",
+        "entertainment",
+        "#F472B6",
         [
-            ("iCloud+", "subscriptions", "#C5D7F6"),
-            ("Spotify", "subscriptions", "#8ED4B0"),
-            ("Cursor", "subscriptions", "#C5D7F6"),
+            ("Advertising", "entertainment", "#F472B6"),
+            ("Printing", "education", "#60A5FA"),
         ],
     ),
-    ("Gym", "health", "#8ED4B0", []),
-    ("Toys", "shopping", "#F472B6", []),
-    ("Charity", "gifts", "#F87171", []),
+    (
+        "Office",
+        "work",
+        "#94A3B8",
+        [
+            ("Supplies", "shopping", "#94A3B8"),
+            ("Equipment", "work", "#94A3B8"),
+        ],
+    ),
+    (
+        "Fees",
+        "debt",
+        "#C084FC",
+        [
+            ("Accounting", "education", "#C084FC"),
+            ("Bank charges", "debt", "#C084FC"),
+            ("Tax", "debt", "#F87171"),
+        ],
+    ),
+    ("Travel", "transport", "#60A5FA", []),
+    ("Client meals", "dining", "#FB923C", []),
+    ("Insurance", "health", "#8ED4B0", []),
+    ("Software", "subscriptions", "#C5D7F6", []),
+]
+BUSINESS_INCOME_CATEGORIES = [
+    (
+        "Sales",
+        "business",
+        "#2DD4BF",
+        [
+            ("Cash sales", "business", "#8ED4B0"),
+            ("Card sales", "business", "#7EB6FF"),
+        ],
+    ),
+    ("Services", "work", "#C5D7F6", []),
+    ("Other business income", "other", "#9CA3AF", []),
 ]
 
 
@@ -103,17 +226,37 @@ def money(value) -> float:
     return float(Decimal(str(value)).quantize(Decimal("0.01")))
 
 
+# Personal expense names from the old defaults. They are removed so the household list is the only one.
+_RETIRED_HOUSEHOLD = {
+    "Shopping",
+    "Health care",
+    "Debt payments",
+    "Entertainment",
+    "Personal care",
+    "Work",
+    "Transfers",
+    "Other",
+    "Outing",
+    "Books",
+    "iCloud+",
+    "Spotify",
+    "Cursor",
+    "Charity",
+    "School items",
+    "Rice and staples",
+    "Dining out",
+    "Gifts/Donation",
+}
+
+
 def seed_categories(db: Session, user_id: str) -> None:
-    order = 0
-    for name, icon, color in EXPENSE_CATEGORIES:
-        db.add(Category(user_id=user_id, name=name, kind="expense", icon=icon, color=color, sort_order=order))
-        order += 1
     order = 0
     for name, icon, color in INCOME_CATEGORIES:
         db.add(Category(user_id=user_id, name=name, kind="income", icon=icon, color=color, sort_order=order))
         order += 1
     db.flush()
     ensure_household_categories(db, user_id)
+    ensure_business_categories(db, user_id)
 
 
 _NOT_CATEGORIES = {"Hutch", "Dialog", "Mobitel", "Business phone"}
@@ -121,7 +264,11 @@ _NOT_CATEGORIES = {"Hutch", "Dialog", "Mobitel", "Business phone"}
 
 def _retire_shop_categories(db: Session, user_id: str) -> None:
     """Hutch, Dialog and Mobitel are shops, so they are not categories."""
-    rows = db.query(Category).filter_by(user_id=user_id, kind="expense").all()
+    rows = [
+        row
+        for row in db.query(Category).filter_by(user_id=user_id, kind="expense").all()
+        if (row.scope or "personal") == "personal"
+    ]
     by_name = {row.name: row for row in rows}
     phone = by_name.get("Phone")
     utilities = by_name.get("Utilities")
@@ -152,20 +299,63 @@ def skipped_category_keys(user: User) -> set[str]:
     return {part for part in (user.skipped_categories or "").split("\n") if part}
 
 
-def remember_skipped_category(user: User, kind: str, name: str) -> None:
-    key = f"{kind}|{name}"
+def _skipped_category_key(kind: str, name: str, scope: str = "personal") -> str:
+    return f"{kind}|{name}" if scope != "business" else f"business|{kind}|{name}"
+
+
+def remember_skipped_category(user: User, kind: str, name: str, scope: str = "personal") -> None:
+    key = _skipped_category_key(kind, name, scope)
     current = skipped_category_keys(user)
     if key in current:
         return
     user.skipped_categories = "\n".join(sorted(current | {key}))
 
 
+def forget_skipped_category(user: User, kind: str, name: str, scope: str = "personal") -> None:
+    key = _skipped_category_key(kind, name, scope)
+    current = skipped_category_keys(user)
+    if key not in current:
+        return
+    user.skipped_categories = "\n".join(sorted(current - {key}))
+
+
+def _membership_over_gym(by_name: dict[str, Category]) -> None:
+    """Membership is the group. Gym is one kind of membership."""
+    membership = by_name.get("Membership")
+    gym = by_name.get("Gym")
+    if membership is None or gym is None or membership.id == gym.id:
+        return
+    for row in by_name.values():
+        if row.parent_id == gym.id and row.id != membership.id:
+            row.parent_id = membership.id
+    membership.parent_id = None
+    gym.parent_id = membership.id
+
+
 def ensure_household_categories(db: Session, user_id: str) -> None:
     """Add the household groups, and tuck an existing match such as Spices under its group."""
     user = db.get(User, user_id)
     skipped = skipped_category_keys(user) if user is not None else set()
-    rows = db.query(Category).filter_by(user_id=user_id, kind="expense").all()
+    rows = [
+        row
+        for row in db.query(Category).filter_by(user_id=user_id, kind="expense").all()
+        if (row.scope or "personal") == "personal"
+    ]
     by_name = {row.name: row for row in rows}
+    for old, new in _HOUSEHOLD_RENAMES:
+        row = by_name.get(old)
+        if row is None or new in by_name:
+            continue
+        row.name = new
+        by_name[new] = row
+        del by_name[old]
+    # The old flat Education category was removed and remembered. Bring the group back once.
+    if user is not None and "expense|__education_restored__" not in skipped:
+        forget_skipped_category(user, "expense", "Education")
+        remember_skipped_category(user, "expense", "__education_restored__")
+        skipped.discard("expense|Education")
+        skipped.add("expense|__education_restored__")
+    _membership_over_gym(by_name)
     has_children = {row.parent_id for row in rows if row.parent_id}
     order = max((row.sort_order or 0 for row in rows), default=-1) + 1
     for name, icon, color, children in HOUSEHOLD_CATEGORIES:
@@ -203,10 +393,127 @@ def ensure_household_categories(db: Session, user_id: str) -> None:
                 )
                 db.add(child)
                 by_name[child_name] = child
+            elif child.id != parent.id and child.id not in has_children and child.parent_id != parent.id:
+                child.parent_id = parent.id
+                child.sort_order = index
+    _drop_retired_household(db, user, user_id)
+    _retire_shop_categories(db, user_id)
+
+
+def _household_names() -> set[str]:
+    names: set[str] = set()
+    for name, _icon, _color, children in HOUSEHOLD_CATEGORIES:
+        names.add(name)
+        for child_name, _child_icon, _child_color in children:
+            names.add(child_name)
+    return names
+
+
+_PRUNE_KEY = "expense|__household_pruned__"
+
+
+def _drop_retired_household(db: Session, user: User | None, user_id: str) -> None:
+    rows = [
+        row
+        for row in db.query(Category).filter_by(user_id=user_id, kind="expense").all()
+        if (row.scope or "personal") == "personal"
+    ]
+    allowed = _household_names()
+    skipped = skipped_category_keys(user) if user is not None else set()
+    prune_all = _PRUNE_KEY not in skipped
+    extra_ids: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for row in rows:
+            if row.id in extra_ids or row.name in allowed:
+                continue
+            unwanted = prune_all or row.name in _RETIRED_HOUSEHOLD
+            if unwanted or row.parent_id in extra_ids:
+                extra_ids.add(row.id)
+                changed = True
+    pending = [row for row in rows if row.id in extra_ids]
+    while pending:
+        leaves = [row for row in pending if not any(other.parent_id == row.id for other in pending)]
+        if not leaves:
+            leaves = pending[:]
+        for row in leaves:
+            db.query(Transaction).filter_by(user_id=user_id, category_id=row.id).update(
+                {"category_id": None},
+                synchronize_session=False,
+            )
+            db.query(Budget).filter_by(user_id=user_id, category_id=row.id).update(
+                {"category_id": None},
+                synchronize_session=False,
+            )
+            if user is not None:
+                remember_skipped_category(user, "expense", row.name, "personal")
+            db.delete(row)
+            pending.remove(row)
+        db.flush()
+    if user is not None and prune_all:
+        remember_skipped_category(user, "expense", "__household_pruned__")
+
+
+def ensure_business_categories(db: Session, user_id: str) -> None:
+    """Add the business groups used when a transaction is marked business."""
+    user = db.get(User, user_id)
+    skipped = skipped_category_keys(user) if user is not None else set()
+    _ensure_business_tree(db, user_id, "expense", BUSINESS_EXPENSE_CATEGORIES, skipped)
+    _ensure_business_tree(db, user_id, "income", BUSINESS_INCOME_CATEGORIES, skipped)
+
+
+def _ensure_business_tree(
+    db: Session,
+    user_id: str,
+    kind: str,
+    tree: list,
+    skipped: set[str],
+) -> None:
+    rows = db.query(Category).filter_by(user_id=user_id, kind=kind, scope="business").all()
+    by_name = {row.name: row for row in rows}
+    has_children = {row.parent_id for row in rows if row.parent_id}
+    order = max((row.sort_order or 0 for row in rows), default=-1) + 1
+    for name, icon, color, children in tree:
+        parent = by_name.get(name)
+        if parent is None and f"business|{kind}|{name}" in skipped:
+            continue
+        if parent is None:
+            parent = Category(
+                user_id=user_id,
+                name=name,
+                kind=kind,
+                icon=icon,
+                color=color,
+                scope="business",
+                sort_order=order,
+            )
+            db.add(parent)
+            db.flush()
+            by_name[name] = parent
+            order += 1
+        elif parent.parent_id:
+            continue
+        for index, (child_name, child_icon, child_color) in enumerate(children):
+            child = by_name.get(child_name)
+            if child is None and f"business|{kind}|{child_name}" in skipped:
+                continue
+            if child is None:
+                child = Category(
+                    user_id=user_id,
+                    name=child_name,
+                    kind=kind,
+                    icon=child_icon,
+                    color=child_color,
+                    scope="business",
+                    parent_id=parent.id,
+                    sort_order=index,
+                )
+                db.add(child)
+                by_name[child_name] = child
             elif child.id != parent.id and child.parent_id is None and child.id not in has_children:
                 child.parent_id = parent.id
                 child.sort_order = index
-    _retire_shop_categories(db, user_id)
 
 
 PAYEE_PRESETS = ("Hutch", "Dialog", "Mobitel")

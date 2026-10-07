@@ -66,7 +66,7 @@ def test_sms_updates_balance_and_dedupes(client):
     first = client.post("/sms/ingest", headers=headers, json={"body": body, "sender": "COMBANK"})
     assert first.status_code == 200, first.text
     assert first.json()["status"] == "posted"
-    assert first.json()["transaction"]["category_name"] == "Shopping"
+    assert first.json()["transaction"]["category_name"] == "Groceries"
     assert first.json()["transaction"]["scope"] == "personal"
     second = client.post("/sms/ingest", headers=headers, json={"body": body, "sender": "COMBANK"})
     assert second.json()["status"] == "duplicate"
@@ -74,6 +74,66 @@ def test_sms_updates_balance_and_dedupes(client):
     assert accounts[0]["balance"] == 9900
     dash = client.get("/dashboard", headers=headers).json()
     assert dash["spent_today"] == 100
+
+
+def test_editing_a_loan_keeps_payments_and_moves_the_balance(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    personal = client.post(
+        "/accounts",
+        headers=headers,
+        json={"name": "Personal", "type": "bank", "purpose": "personal", "opening_balance": 5000},
+    ).json()
+    saving = client.post(
+        "/accounts",
+        headers=headers,
+        json={"name": "Saving", "type": "bank", "purpose": "personal", "opening_balance": 2000},
+    ).json()
+    lent = client.post(
+        "/loans",
+        headers=headers,
+        json={
+            "kind": "lend",
+            "party_kind": "person",
+            "party_name": "Kamal",
+            "account_id": personal["id"],
+            "amount": 800,
+        },
+    ).json()
+    paid = client.post(f"/loans/{lent['id']}/payments", headers=headers, json={"amount": 300})
+    assert paid.status_code == 200
+    edited = client.patch(
+        f"/loans/{lent['id']}",
+        headers=headers,
+        json={
+            "kind": "lend",
+            "party_kind": "person",
+            "party_name": "Brother",
+            "account_id": saving["id"],
+            "amount": 1000,
+            "note": "Family",
+        },
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["party_name"] == "Brother"
+    assert edited.json()["remaining"] == 700
+    assert edited.json()["account_name"] == "Saving"
+    assert edited.json()["note"] == "Family"
+    too_small = client.patch(
+        f"/loans/{lent['id']}",
+        headers=headers,
+        json={
+            "kind": "lend",
+            "party_kind": "person",
+            "party_name": "Brother",
+            "account_id": saving["id"],
+            "amount": 100,
+        },
+    )
+    assert too_small.status_code == 400
+    balances = {row["name"]: row["balance"] for row in client.get("/accounts", headers=headers).json()}
+    assert balances["Personal"] == 5000
+    assert balances["Saving"] == 2000 - 1000 + 300
 
 
 def test_business_account_and_unmatched_sms(client):
@@ -793,6 +853,25 @@ def test_category_budget_includes_subcategories(client):
     utilities = next(row for row in rows if row["name"] == "Utilities")
     phone = next(row for row in rows if row["name"] == "Phone")
     assert phone["parent_id"] == utilities["id"]
+    fruits = next(row for row in rows if row["name"] == "Fruits")
+    assert fruits["parent_id"] == groceries["id"]
+    assert next(row for row in rows if row["name"] == "Public")["parent_id"] == next(
+        row for row in rows if row["name"] == "Transport"
+    )["id"]
+    education = next(row for row in rows if row["name"] == "Education" and row.get("scope") != "business")
+    assert next(row for row in rows if row["name"] == "Islamic class")["parent_id"] == education["id"]
+    assert next(row for row in rows if row["name"] == "School fees")["parent_id"] == education["id"]
+    kids = next(row for row in rows if row["name"] == "Kids")
+    assert next(row for row in rows if row["name"] == "Toys")["parent_id"] == kids["id"]
+    day_out = next(row for row in rows if row["name"] == "Day out")
+    assert next(row for row in rows if row["name"] == "Breakfast")["parent_id"] == day_out["id"]
+    membership = next(row for row in rows if row["name"] == "Membership" and row.get("scope") != "business")
+    assert next(row for row in rows if row["name"] == "Gym" and row.get("scope") != "business")["parent_id"] == membership["id"]
+    assert not any(
+        row["name"] in {"Dining out", "Rice and staples", "School items", "Shopping", "Outing", "Charity", "Health care", "iCloud+", "Spotify", "Cursor"}
+        for row in rows
+        if row["kind"] == "expense" and row.get("scope") != "business"
+    )
     assert not any(row["name"] in {"Hutch", "Dialog", "Mobitel"} for row in rows)
     created = client.post(
         "/budgets",
@@ -837,6 +916,92 @@ def test_category_budget_includes_subcategories(client):
     assert any(row["name"] == "Keells" and row["detail"] == "" for row in saved)
 
 
+def test_school_is_renamed_to_education_and_keeps_its_fees(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    from app.db import SessionLocal
+    from app.models import Category, User
+
+    db = SessionLocal()
+    user = db.query(User).filter_by(email="rimas@example.com").one()
+    education = db.query(Category).filter_by(user_id=user.id, name="Education", kind="expense").one()
+    education.name = "School"
+    islamic = db.query(Category).filter_by(user_id=user.id, name="Islamic class").one()
+    db.delete(islamic)
+    db.commit()
+    db.close()
+    rows = client.get("/categories", headers=headers).json()
+    education = next(row for row in rows if row["name"] == "Education" and row.get("scope") != "business")
+    assert next(row for row in rows if row["name"] == "Islamic class")["parent_id"] == education["id"]
+    assert next(row for row in rows if row["name"] == "School fees")["parent_id"] == education["id"]
+    assert not any(row["name"] == "School" and row.get("scope") != "business" for row in rows)
+
+
+def test_membership_is_the_group_and_a_removed_education_comes_back(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    from app.db import SessionLocal
+    from app.models import Category, User
+
+    db = SessionLocal()
+    user = db.query(User).filter_by(email="rimas@example.com").one()
+    membership = db.query(Category).filter_by(user_id=user.id, name="Membership", kind="expense").one()
+    gym = db.query(Category).filter_by(user_id=user.id, name="Gym", kind="expense").one()
+    gym.parent_id = None
+    membership.parent_id = gym.id
+    education = db.query(Category).filter_by(user_id=user.id, name="Education", kind="expense").one()
+    db.delete(education)
+    user.skipped_categories = "\n".join(
+        part
+        for part in (user.skipped_categories or "").split("\n")
+        if part and part != "expense|__education_restored__"
+    )
+    from app.services import remember_skipped_category
+
+    remember_skipped_category(user, "expense", "Education")
+    db.commit()
+    db.close()
+    rows = client.get("/categories", headers=headers).json()
+    membership = next(row for row in rows if row["name"] == "Membership" and row.get("scope") != "business")
+    gym = next(row for row in rows if row["name"] == "Gym" and row.get("scope") != "business")
+    education = next(row for row in rows if row["name"] == "Education" and row.get("scope") != "business")
+    assert gym["parent_id"] == membership["id"]
+    assert membership["parent_id"] is None
+    assert education["parent_id"] is None
+    assert next(row for row in rows if row["name"] == "Islamic class")["parent_id"] == education["id"]
+
+
+def test_personal_categories_outside_the_household_list_are_removed(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    for name in ("Life & Entertainment", "Health care", "Personal care"):
+        created = client.post(
+            "/categories",
+            headers=headers,
+            json={"name": name, "kind": "expense", "scope": "personal"},
+        )
+        assert created.status_code == 200, created.text
+    from app.db import SessionLocal
+    from app.models import User
+
+    db = SessionLocal()
+    user = db.query(User).filter_by(email="rimas@example.com").one()
+    user.skipped_categories = "\n".join(
+        part for part in (user.skipped_categories or "").split("\n") if part != "expense|__household_pruned__"
+    )
+    db.commit()
+    db.close()
+    rows = client.get("/categories", headers=headers).json()
+    personal = {row["name"] for row in rows if row["kind"] == "expense" and row.get("scope") != "business"}
+    assert "Life & Entertainment" not in personal
+    assert "Health care" not in personal
+    assert "Personal care" not in personal
+    assert "Groceries" in personal
+    doctor = next(row for row in rows if row["name"] == "Doctor")
+    health = next(row for row in rows if row["name"] == "Health" and row.get("scope") != "business")
+    assert doctor["parent_id"] == health["id"]
+
+
 def test_category_rename_subcategory_and_delete_stick(client):
     token = auth(client)
     headers = {"Authorization": f"Bearer {token}"}
@@ -867,10 +1032,10 @@ def test_category_rename_subcategory_and_delete_stick(client):
     assert removed_group.status_code == 200, removed_group.text
     after_group = client.get("/categories", headers=headers).json()
     assert not any(row["name"] in {"Groceries", "Greens", "Spices"} for row in after_group)
-    outing = next(row for row in after_group if row["name"] == "Outing")
+    transport = next(row for row in after_group if row["name"] == "Transport")
     utilities = next(row for row in after_group if row["name"] == "Utilities")
     ordered_ids = [row["id"] for row in after_group if row["kind"] == "expense"]
-    swapped = [utilities["id"], outing["id"], *[row_id for row_id in ordered_ids if row_id not in {utilities["id"], outing["id"]}]]
+    swapped = [utilities["id"], transport["id"], *[row_id for row_id in ordered_ids if row_id not in {utilities["id"], transport["id"]}]]
     parents = {row["id"] for row in after_group if row["kind"] == "expense" and not row["parent_id"]}
     ordered = client.post(
         "/categories/order",
@@ -886,7 +1051,69 @@ def test_category_rename_subcategory_and_delete_stick(client):
     assert ordered.status_code == 200, ordered.text
     listed = [row["id"] for row in client.get("/categories", headers=headers).json() if row["kind"] == "expense"]
     assert listed[0] == utilities["id"]
-    assert outing["id"] in parents
+    assert transport["id"] in parents
+
+
+def test_business_categories_stay_separate_from_household(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    rows = client.get("/categories", headers=headers).json()
+    business = [row for row in rows if row["scope"] == "business" and row["kind"] == "expense"]
+    names = {row["name"] for row in business}
+    assert {"Stock", "Goods", "Rent", "Salaries", "Shop phone"} <= names
+    stock = next(row for row in business if row["name"] == "Stock")
+    goods = next(row for row in business if row["name"] == "Goods")
+    assert goods["parent_id"] == stock["id"]
+    groceries = next(row for row in rows if row["name"] == "Groceries")
+    assert groceries["scope"] == "personal"
+    income = {row["name"] for row in rows if row["scope"] == "business" and row["kind"] == "income"}
+    assert {"Sales", "Cash sales", "Services"} <= income
+    created = client.post(
+        "/categories",
+        headers=headers,
+        json={"name": "Groceries", "kind": "expense", "scope": "business"},
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["scope"] == "business"
+    clash = client.post(
+        "/categories",
+        headers=headers,
+        json={"name": "Stock", "kind": "expense", "scope": "business"},
+    )
+    assert clash.status_code == 400
+    account = client.post(
+        "/accounts",
+        headers=headers,
+        json={"name": "Shop", "type": "cash", "purpose": "business", "opening_balance": 5000},
+    ).json()
+    wrong = client.post(
+        "/transactions",
+        headers=headers,
+        json={
+            "account_id": account["id"],
+            "direction": "expense",
+            "amount": 100,
+            "merchant": "Keells",
+            "category_id": groceries["id"],
+            "scope": "business",
+        },
+    )
+    assert wrong.status_code == 400
+    saved = client.post(
+        "/transactions",
+        headers=headers,
+        json={
+            "account_id": account["id"],
+            "direction": "expense",
+            "amount": 100,
+            "merchant": "Supplier",
+            "category_id": goods["id"],
+            "scope": "business",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["scope"] == "business"
+    assert saved.json()["category_name"] == "Goods"
 
 
 def test_deleting_a_recorded_payment_brings_the_subscription_back(client):

@@ -10,7 +10,7 @@ from urllib.request import urlopen
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.auth import decode_token, hash_password, make_token, verify_password
@@ -31,6 +31,7 @@ from app.services import (
     remember_card,
     loan_json,
     lkr_settlement,
+    ensure_business_categories,
     ensure_household_categories,
     remember_skipped_category,
     ensure_payees,
@@ -170,12 +171,20 @@ class CategoryIn(BaseModel):
     icon: str = "other"
     color: str = "#9CA3AF"
     parent_id: str | None = None
+    scope: str = "personal"
 
     @field_validator("kind")
     @classmethod
     def clean_kind(cls, value: str) -> str:
         if value not in {"expense", "income"}:
             raise ValueError("Kind must be expense or income")
+        return value
+
+    @field_validator("scope")
+    @classmethod
+    def clean_scope(cls, value: str) -> str:
+        if value not in PURPOSES:
+            raise ValueError("Choose personal or business")
         return value
 
     @field_validator("name")
@@ -673,6 +682,7 @@ def delete_account(account_id: str, user: User = Depends(current_user), db: Sess
 @router.get("/categories")
 def list_categories(user: User = Depends(current_user), db: Session = Depends(get_db)):
     ensure_household_categories(db, user.id)
+    ensure_business_categories(db, user.id)
     db.commit()
     counts: dict[str, int] = {}
     for txn in db.query(Transaction).filter_by(user_id=user.id, status="posted").all():
@@ -684,46 +694,10 @@ def list_categories(user: User = Depends(current_user), db: Session = Depends(ge
         .order_by(Category.kind, Category.sort_order, Category.name)
         .all()
     )
-    return [
-        {
-            "id": row.id,
-            "name": row.name,
-            "kind": row.kind,
-            "icon": row.icon,
-            "color": row.color,
-            "parent_id": row.parent_id,
-            "transaction_count": counts.get(row.id, 0),
-        }
-        for row in rows
-    ]
+    return [category_out(row, counts.get(row.id, 0)) for row in rows]
 
 
-@router.post("/categories")
-def create_category(body: CategoryIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    exists = db.query(Category).filter_by(user_id=user.id, kind=body.kind, name=body.name).first()
-    if exists:
-        raise HTTPException(400, "That category already exists")
-    parent_id = None
-    if body.parent_id:
-        parent = _owned_category(db, user, body.parent_id)
-        if parent.kind != body.kind:
-            raise HTTPException(400, "A subcategory has to match its category")
-        if parent.parent_id:
-            raise HTTPException(400, "Add this under the main category")
-        parent_id = parent.id
-    last = db.query(func.max(Category.sort_order)).filter_by(user_id=user.id, kind=body.kind).scalar()
-    row = Category(
-        user_id=user.id,
-        name=body.name,
-        kind=body.kind,
-        icon=body.icon,
-        color=body.color,
-        parent_id=parent_id,
-        sort_order=int(last or 0) + 1,
-    )
-    db.add(row)
-    db.commit()
-    db.refresh(row)
+def category_out(row: Category, count: int = 0) -> dict:
     return {
         "id": row.id,
         "name": row.name,
@@ -731,8 +705,39 @@ def create_category(body: CategoryIn, user: User = Depends(current_user), db: Se
         "icon": row.icon,
         "color": row.color,
         "parent_id": row.parent_id,
-        "transaction_count": 0,
+        "scope": row.scope or "personal",
+        "transaction_count": count,
     }
+
+
+@router.post("/categories")
+def create_category(body: CategoryIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    exists = db.query(Category).filter_by(user_id=user.id, kind=body.kind, name=body.name, scope=body.scope).first()
+    if exists:
+        raise HTTPException(400, "That category already exists")
+    parent_id = None
+    if body.parent_id:
+        parent = _owned_category(db, user, body.parent_id)
+        if parent.kind != body.kind or (parent.scope or "personal") != body.scope:
+            raise HTTPException(400, "A subcategory has to match its category")
+        if parent.parent_id:
+            raise HTTPException(400, "Add this under the main category")
+        parent_id = parent.id
+    last = db.query(func.max(Category.sort_order)).filter_by(user_id=user.id, kind=body.kind, scope=body.scope).scalar()
+    row = Category(
+        user_id=user.id,
+        name=body.name,
+        kind=body.kind,
+        icon=body.icon,
+        color=body.color,
+        parent_id=parent_id,
+        scope=body.scope,
+        sort_order=int(last or 0) + 1,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return category_out(row)
 
 
 class CategoryPlacement(BaseModel):
@@ -742,6 +747,7 @@ class CategoryPlacement(BaseModel):
 
 class CategoryOrderIn(BaseModel):
     kind: str
+    scope: str | None = None
     items: list[CategoryPlacement]
 
     @field_validator("kind")
@@ -751,10 +757,22 @@ class CategoryOrderIn(BaseModel):
             raise ValueError("Kind must be expense or income")
         return value
 
+    @field_validator("scope")
+    @classmethod
+    def clean_order_scope(cls, value: str | None) -> str | None:
+        if value is not None and value not in PURPOSES:
+            raise ValueError("Choose personal or business")
+        return value
+
 
 @router.post("/categories/order")
 def order_categories(body: CategoryOrderIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    rows = db.query(Category).filter_by(user_id=user.id, kind=body.kind).all()
+    query = db.query(Category).filter_by(user_id=user.id, kind=body.kind)
+    if body.scope == "business":
+        query = query.filter(Category.scope == "business")
+    elif body.scope == "personal":
+        query = query.filter(or_(Category.scope == "personal", Category.scope.is_(None)))
+    rows = query.all()
     known = {row.id: row for row in rows}
     if {item.id for item in body.items} != set(known):
         raise HTTPException(400, "Include every category")
@@ -790,22 +808,21 @@ def update_category(
     db: Session = Depends(get_db),
 ):
     row = _owned_category(db, user, category_id)
-    clash = db.query(Category).filter_by(user_id=user.id, kind=row.kind, name=body.name).first()
+    clash = (
+        db.query(Category)
+        .filter_by(user_id=user.id, kind=row.kind, name=body.name, scope=row.scope or "personal")
+        .first()
+    )
     if clash is not None and clash.id != row.id:
         raise HTTPException(400, "That category already exists")
-    remember_skipped_category(user, row.kind, row.name)
+    remember_skipped_category(user, row.kind, row.name, row.scope or "personal")
     row.name = body.name
     db.commit()
     db.refresh(row)
-    return {
-        "id": row.id,
-        "name": row.name,
-        "kind": row.kind,
-        "icon": row.icon,
-        "color": row.color,
-        "parent_id": row.parent_id,
-        "transaction_count": db.query(Transaction).filter_by(user_id=user.id, category_id=row.id, status="posted").count(),
-    }
+    return category_out(
+        row,
+        db.query(Transaction).filter_by(user_id=user.id, category_id=row.id, status="posted").count(),
+    )
 
 
 def _purge_category(db: Session, user: User, row: Category) -> None:
@@ -820,7 +837,7 @@ def _purge_category(db: Session, user: User, row: Category) -> None:
         {"category_id": None},
         synchronize_session=False,
     )
-    remember_skipped_category(user, row.kind, row.name)
+    remember_skipped_category(user, row.kind, row.name, row.scope or "personal")
     db.delete(row)
 
 
@@ -921,6 +938,11 @@ def create_transaction(body: TxnIn, user: User = Depends(current_user), db: Sess
         raise HTTPException(400, "That category is for income")
     if category and category.kind == "expense" and body.direction == "income":
         raise HTTPException(400, "That category is for expenses")
+    if category and body.direction != "transfer" and (category.scope or "personal") != scope:
+        raise HTTPException(
+            400,
+            "Choose a business category" if scope == "business" else "Choose a personal category",
+        )
     txn = Transaction(
         user_id=user.id,
         account_id=account.id,
@@ -1220,8 +1242,7 @@ def list_loans(user: User = Depends(current_user), db: Session = Depends(get_db)
     return payload
 
 
-@router.post("/loans")
-def create_loan(body: LoanIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def _loan_parties(db: Session, user: User, body: LoanIn) -> tuple[Account | None, Account | None, str]:
     account = _owned_account(db, user, body.account_id) if body.account_id else None
     other = None
     if body.party_kind == "account":
@@ -1235,6 +1256,74 @@ def create_loan(body: LoanIn, user: User = Depends(current_user), db: Session = 
         party_name = body.party_name.strip()
         if not party_name:
             raise HTTPException(400, "Add the person or business name")
+    return account, other, party_name
+
+
+def _opening_loan_txn(db: Session, user: User, loan: Loan) -> Transaction | None:
+    rows = db.query(Transaction).filter_by(user_id=user.id, loan_id=loan.id).all()
+    openings = [row for row in rows if not (row.merchant or "").startswith("Repayment")]
+    return openings[0] if openings else None
+
+
+def _sync_loan_transactions(db: Session, user: User, loan: Loan, previous_account_id: str | None) -> None:
+    payments = db.query(LoanPayment).filter_by(loan_id=loan.id).all()
+    for payment in payments:
+        if payment.account_id == previous_account_id:
+            payment.account_id = loan.account_id
+    opening = _opening_loan_txn(db, user, loan)
+    out_id, in_id = _movement_accounts(loan, False, None)
+    if out_id is None and in_id is None:
+        if opening is not None:
+            db.delete(opening)
+    elif opening is None:
+        _post_loan_movement(db, user, loan, Decimal(str(loan.amount)), False, None, loan.opened_at)
+    else:
+        _apply_loan_txn(db, opening, loan, out_id, in_id, Decimal(str(loan.amount)), False)
+    repayments = [
+        row
+        for row in db.query(Transaction).filter_by(user_id=user.id, loan_id=loan.id).all()
+        if (row.merchant or "").startswith("Repayment")
+    ]
+    used: set[str] = set()
+    for payment in payments:
+        match = next(
+            (
+                row
+                for row in repayments
+                if row.id not in used and Decimal(str(row.amount)) == Decimal(str(payment.amount))
+            ),
+            None,
+        )
+        if match is None:
+            continue
+        used.add(match.id)
+        pay_out, pay_in = _movement_accounts(loan, True, payment.account_id)
+        _apply_loan_txn(db, match, loan, pay_out, pay_in, Decimal(str(payment.amount)), True)
+
+
+def _apply_loan_txn(
+    db: Session,
+    txn: Transaction,
+    loan: Loan,
+    out_id: str | None,
+    in_id: str | None,
+    amount: Decimal,
+    repayment: bool,
+) -> None:
+    anchor = db.get(Account, in_id) if in_id else None
+    if anchor is None and out_id:
+        anchor = db.get(Account, out_id)
+    txn.account_id = out_id
+    txn.transfer_account_id = in_id
+    txn.amount = amount
+    txn.merchant = _loan_label(loan, repayment)
+    txn.note = loan.note or ""
+    txn.scope = anchor.purpose if anchor else "personal"
+
+
+@router.post("/loans")
+def create_loan(body: LoanIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    account, other, party_name = _loan_parties(db, user, body)
     loan = Loan(
         user_id=user.id,
         kind=body.kind,
@@ -1254,6 +1343,28 @@ def create_loan(body: LoanIn, user: User = Depends(current_user), db: Session = 
     db.commit()
     db.refresh(loan)
     return loan_json(loan, account_map(db, user.id), Decimal("0"))
+
+
+@router.patch("/loans/{loan_id}")
+def update_loan(loan_id: str, body: LoanIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    loan = _loan_or_404(db, user, loan_id)
+    repaid = _repaid(db, loan.id)
+    if body.amount < repaid:
+        raise HTTPException(400, "That is less than the amount already repaid")
+    account, other, party_name = _loan_parties(db, user, body)
+    previous_account_id = loan.account_id
+    loan.kind = body.kind
+    loan.party_kind = body.party_kind
+    loan.party_name = party_name
+    loan.counterparty_account_id = other.id if other else None
+    loan.account_id = account.id if account else None
+    loan.amount = body.amount
+    loan.due_on = body.due_on
+    loan.note = body.note.strip()
+    _sync_loan_transactions(db, user, loan, previous_account_id)
+    db.commit()
+    db.refresh(loan)
+    return loan_json(loan, account_map(db, user.id), repaid)
 
 
 @router.post("/loans/{loan_id}/payments")

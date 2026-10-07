@@ -16,6 +16,15 @@ class CategoriesScreen extends StatefulWidget {
 
 class _CategoriesScreenState extends State<CategoriesScreen> {
   String _kind = 'expense';
+  String _scope = 'personal';
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) context.read<FolioStore>().refresh();
+    });
+  }
 
   Future<void> _add({CategoryModel? parent}) async {
     final name = await showDialog<String>(
@@ -27,7 +36,12 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
     );
     if (name == null || name.isEmpty || !mounted) return;
     try {
-      await context.read<FolioStore>().createCategory(name, parent?.kind ?? _kind, parentId: parent?.id);
+      await context.read<FolioStore>().createCategory(
+        name,
+        parent?.kind ?? _kind,
+        scope: parent?.scope ?? _scope,
+        parentId: parent?.id,
+      );
     } catch (error) {
       if (mounted) showError(context, error);
     }
@@ -79,10 +93,12 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
 
   Future<void> _reorder(int oldIndex, int newIndex) async {
     final store = context.read<FolioStore>();
-    final current = displayCategories(store.categories.where((category) => category.kind == _kind));
+    final current = displayCategories(
+      store.categories.where((category) => category.kind == _kind && category.scope == _scope),
+    );
     final ordered = reorderCategoryList(current, oldIndex, newIndex);
     try {
-      await store.reorderCategories(_kind, ordered);
+      await store.reorderCategories(_kind, ordered, scope: _scope);
     } catch (error) {
       if (mounted) showError(context, error);
     }
@@ -91,7 +107,7 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
   @override
   Widget build(BuildContext context) {
     final categories = displayCategories(
-      context.watch<FolioStore>().categories.where((category) => category.kind == _kind),
+      context.watch<FolioStore>().categories.where((category) => category.kind == _kind && category.scope == _scope),
     );
     return Scaffold(
       appBar: AppBar(title: const Text('Categories')),
@@ -105,10 +121,42 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-            child: ChoiceChipRow(
-              labels: const ['Expense', 'Income'],
-              selected: _kind == 'income' ? 1 : 0,
-              onSelect: (index) => setState(() => _kind = index == 1 ? 'income' : 'expense'),
+            child: Row(
+              children: [
+                Expanded(
+                  child: DropdownButtonFormField<String>(
+                    key: ValueKey('kind-$_kind'),
+                    initialValue: _kind,
+                    isExpanded: true,
+                    dropdownColor: FolioColors.card,
+                    icon: const Icon(Icons.keyboard_arrow_down_rounded, color: FolioColors.muted),
+                    items: const [
+                      DropdownMenuItem(value: 'expense', child: Text('Expense')),
+                      DropdownMenuItem(value: 'income', child: Text('Income')),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) setState(() => _kind = value);
+                    },
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: DropdownButtonFormField<String>(
+                    key: ValueKey('scope-$_scope'),
+                    initialValue: _scope,
+                    isExpanded: true,
+                    dropdownColor: FolioColors.card,
+                    icon: const Icon(Icons.keyboard_arrow_down_rounded, color: FolioColors.muted),
+                    items: const [
+                      DropdownMenuItem(value: 'personal', child: Text('Personal')),
+                      DropdownMenuItem(value: 'business', child: Text('Business')),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) setState(() => _scope = value);
+                    },
+                  ),
+                ),
+              ],
             ),
           ),
           const SizedBox(height: 8),
@@ -167,7 +215,8 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
   }
 }
 
-/// Moves one row, keeps a category's subcategories with it, and lets a subcategory land under another category.
+/// Moves one row. A subcategory dropped under another category joins it.
+/// A main category dropped directly under another main category becomes its subcategory.
 List<CategoryModel> reorderCategoryList(List<CategoryModel> items, int oldIndex, int newIndex) {
   if (items.isEmpty || oldIndex < 0 || oldIndex >= items.length || oldIndex == newIndex) return items;
   if (newIndex < 0) newIndex = 0;
@@ -178,26 +227,41 @@ List<CategoryModel> reorderCategoryList(List<CategoryModel> items, int oldIndex,
   final moving = items[oldIndex];
   final next = [...items]..removeAt(oldIndex);
   next.insert(newIndex, moving);
-  if (parentIds.contains(moving.id)) {
-    final children = [for (final item in items) if (item.parentId == moving.id) item];
-    final childIds = {for (final child in children) child.id};
-    final stripped = [for (final item in next) if (!childIds.contains(item.id)) item];
-    final at = stripped.indexWhere((item) => item.id == moving.id);
-    stripped.insertAll(at + 1, children);
-    return stripped;
+  if (!parentIds.contains(moving.id)) {
+    String? parentId;
+    final at = next.indexWhere((item) => item.id == moving.id);
+    for (var i = at - 1; i >= 0; i--) {
+      if (parentIds.contains(next[i].id)) {
+        parentId = next[i].id;
+        break;
+      }
+    }
+    if (parentId == moving.parentId) return next;
+    next[at] = moving.copyWith(parentId: parentId, clearParent: parentId == null);
+    return next;
   }
 
-  String? parentId;
-  final at = next.indexWhere((item) => item.id == moving.id);
-  for (var i = at - 1; i >= 0; i--) {
-    if (parentIds.contains(next[i].id)) {
-      parentId = next[i].id;
-      break;
-    }
+  final children = [for (final item in items) if (item.parentId == moving.id) item];
+  final childIds = {for (final child in children) child.id};
+  final stripped = [for (final item in next) if (!childIds.contains(item.id)) item];
+  final at = stripped.indexWhere((item) => item.id == moving.id);
+  stripped.insertAll(at + 1, children);
+  if (at == 0) return stripped;
+  final above = stripped[at - 1];
+  final String? parentId;
+  if (parentIds.contains(above.id)) {
+    parentId = above.id;
+  } else if (children.isEmpty && above.parentId != null && parentIds.contains(above.parentId)) {
+    parentId = above.parentId;
+  } else {
+    return stripped;
   }
-  if (parentId == moving.parentId) return next;
-  next[at] = moving.copyWith(parentId: parentId, clearParent: parentId == null);
-  return next;
+  final nested = [...stripped];
+  nested[at] = moving.copyWith(parentId: parentId);
+  for (var i = 0; i < children.length; i++) {
+    nested[at + 1 + i] = children[i].copyWith(parentId: parentId);
+  }
+  return nested;
 }
 
 bool _isParentRow(CategoryModel item, List<CategoryModel> items) {

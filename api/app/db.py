@@ -107,6 +107,16 @@ def _ensure_user_columns() -> None:
         category_columns = {column["name"] for column in inspector.get_columns("categories")}
         if "parent_id" not in category_columns:
             statements.append("ALTER TABLE categories ADD COLUMN parent_id VARCHAR(36)")
+        if "scope" not in category_columns:
+            statements.append("ALTER TABLE categories ADD COLUMN scope VARCHAR(16) DEFAULT 'personal'")
+        if engine.dialect.name != "sqlite":
+            names = {item["name"] for item in inspector.get_unique_constraints("categories")}
+            if "uq_category_name" in names:
+                statements.append("ALTER TABLE categories DROP CONSTRAINT uq_category_name")
+            if "uq_category_scope" not in names:
+                statements.append(
+                    "ALTER TABLE categories ADD CONSTRAINT uq_category_scope UNIQUE (user_id, kind, scope, name)"
+                )
     if "accounts" in inspector.get_table_names():
         account_columns = {column["name"] for column in inspector.get_columns("accounts")}
         bool_default = "0" if engine.dialect.name == "sqlite" else "FALSE"

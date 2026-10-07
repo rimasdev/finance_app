@@ -312,48 +312,58 @@ class _LoanCard extends StatelessWidget {
               ),
               const SizedBox(width: 12),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      loan.partyName,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 16,
+                child: GestureDetector(
+                  onTap: () => _edit(context),
+                  behavior: HitTestBehavior.opaque,
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              loan.partyName,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                                fontSize: 16,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              kind,
+                              style: const TextStyle(
+                                color: FolioColors.muted,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      kind,
-                      style: const TextStyle(
-                        color: FolioColors.muted,
-                        fontSize: 13,
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(
+                              money(loan.settled ? loan.amount : loan.remaining),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                                fontSize: 15,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              loan.settled ? 'Settled' : 'of ${money(loan.amount)}',
+                              style: const TextStyle(
+                                color: FolioColors.muted,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                  ],
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text(
-                      money(loan.settled ? loan.amount : loan.remaining),
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 15,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      loan.settled ? 'Settled' : 'of ${money(loan.amount)}',
-                      style: const TextStyle(
-                        color: FolioColors.muted,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
               IconButton(
@@ -436,6 +446,13 @@ class _LoanCard extends StatelessWidget {
             : 'From ${loan.counterpartyAccountName}',
     ];
     return parts.join(' · ');
+  }
+
+  void _edit(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => LoanFormScreen(existing: loan)),
+    );
   }
 
   Future<void> _confirmDelete(BuildContext context, FolioStore store) async {
@@ -531,7 +548,9 @@ class _LoanCard extends StatelessWidget {
 }
 
 class LoanFormScreen extends StatefulWidget {
-  const LoanFormScreen({super.key});
+  const LoanFormScreen({super.key, this.existing});
+
+  final LoanModel? existing;
 
   @override
   State<LoanFormScreen> createState() => _LoanFormScreenState();
@@ -547,6 +566,21 @@ class _LoanFormScreenState extends State<LoanFormScreen> {
   String? _otherId;
   DateTime? _due;
   bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final existing = widget.existing;
+    if (existing == null) return;
+    _kind = existing.kind;
+    _partyKind = existing.partyKind;
+    if (existing.partyKind != 'account') _name.text = existing.partyName;
+    _accountId = existing.accountId.isEmpty ? null : existing.accountId;
+    _otherId = existing.counterpartyAccountId;
+    _amount.text = _grouped(existing.amount);
+    _note.text = existing.note;
+    if (existing.dueOn.isNotEmpty) _due = DateTime.parse(existing.dueOn);
+  }
 
   @override
   void didChangeDependencies() {
@@ -576,6 +610,22 @@ class _LoanFormScreenState extends State<LoanFormScreen> {
   }
 
   String get _otherLabel => _kind == 'lend' ? 'To account' : 'From account';
+
+  Widget _accountChoice(AccountModel account) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            '${account.name} · ${account.isBusiness ? 'Business' : 'Personal'}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(money(account.balance), style: const TextStyle(fontWeight: FontWeight.w600)),
+      ],
+    );
+  }
 
   bool get _canPickContact =>
       !kIsWeb &&
@@ -615,6 +665,11 @@ class _LoanFormScreenState extends State<LoanFormScreen> {
       showError(context, Exception('Add the loan amount'));
       return;
     }
+    final existing = widget.existing;
+    if (existing != null && amount + 0.001 < existing.repaid) {
+      showError(context, Exception('That is less than the amount already repaid'));
+      return;
+    }
     if (_internal && _accountId == null) {
       showError(context, Exception('Choose an account'));
       return;
@@ -628,18 +683,23 @@ class _LoanFormScreenState extends State<LoanFormScreen> {
       showError(context, Exception('Add the person or business name'));
       return;
     }
+    final body = {
+      'kind': _kind,
+      'party_kind': _partyKind,
+      'party_name': _internal ? '' : _name.text.trim(),
+      'account_id': _accountId,
+      'counterparty_account_id': _internal ? _otherId : null,
+      'amount': amount,
+      'due_on': _due?.toIso8601String().substring(0, 10),
+      'note': _note.text.trim(),
+    };
     setState(() => _busy = true);
     try {
-      await store.createLoan({
-        'kind': _kind,
-        'party_kind': _partyKind,
-        'party_name': _internal ? '' : _name.text.trim(),
-        'account_id': _accountId,
-        'counterparty_account_id': _internal ? _otherId : null,
-        'amount': amount,
-        'due_on': _due?.toIso8601String().substring(0, 10),
-        'note': _note.text.trim(),
-      });
+      if (existing == null) {
+        await store.createLoan(body);
+      } else {
+        await store.updateLoan(existing.id, body);
+      }
       if (mounted) Navigator.pop(context);
     } catch (error) {
       if (mounted) showError(context, error);
@@ -657,7 +717,7 @@ class _LoanFormScreenState extends State<LoanFormScreen> {
     return GestureDetector(
       onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
       child: Scaffold(
-        appBar: AppBar(title: const Text('New loan')),
+        appBar: AppBar(title: Text(widget.existing == null ? 'New loan' : 'Edit loan')),
         body: ListView(
           keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
@@ -729,11 +789,7 @@ class _LoanFormScreenState extends State<LoanFormScreen> {
                 for (final account in accounts)
                   DropdownMenuItem(
                     value: account.id,
-                    child: Text(
-                      '${account.name} · ${account.isBusiness ? 'Business' : 'Personal'}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
+                    child: _accountChoice(account),
                   ),
               ],
               onChanged: (value) => setState(() {
@@ -770,11 +826,7 @@ class _LoanFormScreenState extends State<LoanFormScreen> {
                   for (final account in others)
                     DropdownMenuItem(
                       value: account.id,
-                      child: Text(
-                        '${account.name} · ${account.isBusiness ? 'Business' : 'Personal'}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
+                      child: _accountChoice(account),
                     ),
                 ],
                 onChanged: (value) => setState(() => _otherId = value),
@@ -817,12 +869,29 @@ class _LoanFormScreenState extends State<LoanFormScreen> {
               decoration: const InputDecoration(hintText: 'Note, optional'),
             ),
             const SizedBox(height: 20),
-            PrimaryButton(label: 'Save loan', busy: _busy, onPressed: _save),
+            PrimaryButton(
+              label: widget.existing == null ? 'Save loan' : 'Save changes',
+              busy: _busy,
+              onPressed: _save,
+            ),
           ],
         ),
       ),
     );
   }
+}
+
+String _grouped(double amount) {
+  final plain = amount == amount.roundToDouble() ? amount.toStringAsFixed(0) : amount.toStringAsFixed(2);
+  final dot = plain.indexOf('.');
+  final whole = dot == -1 ? plain : plain.substring(0, dot);
+  final fraction = dot == -1 ? '' : plain.substring(dot);
+  final buffer = StringBuffer();
+  for (var i = 0; i < whole.length; i++) {
+    if (i > 0 && (whole.length - i) % 3 == 0) buffer.write(',');
+    buffer.write(whole[i]);
+  }
+  return '$buffer$fraction';
 }
 
 String _dueLabel(String iso) {

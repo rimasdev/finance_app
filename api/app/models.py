@@ -62,7 +62,7 @@ class Account(Base):
 
 class Category(Base):
     __tablename__ = "categories"
-    __table_args__ = (UniqueConstraint("user_id", "kind", "name", name="uq_category_name"),)
+    __table_args__ = (UniqueConstraint("user_id", "kind", "scope", "name", name="uq_category_scope"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
@@ -72,6 +72,7 @@ class Category(Base):
     color: Mapped[str] = mapped_column(String(16), default="#9CA3AF")
     sort_order: Mapped[int] = mapped_column(default=0)
     parent_id: Mapped[str | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
+    scope: Mapped[str] = mapped_column(String(16), default="personal")
 
     user: Mapped[User] = relationship(back_populates="categories")
 

@@ -59,21 +59,25 @@ CATEGORY_RULES = [
     (re.compile(r"(?i)\b(dialog|mobitel|hutch|airtel|slt|lanka bell|leco|ceb|peo\s*tv)\b"), "Utilities"),
     (
         re.compile(
-            r"(?i)keells|cargills|arpico|glomark|\bspar\b|supermarket|food\s*city|laughfs|odel|"
-            r"softlogic|nolimit|cool planet|spa ceylon|kids mania|toy|fashion|cotton collection"
+            r"(?i)keells|cargills|arpico|glomark|\bspar\b|supermarket|food\s*city|laughfs|"
+            r"softlogic|cool planet"
         ),
-        "Shopping",
+        "Groceries",
     ),
+    (re.compile(r"(?i)\b(toy|toys|kids mania)\b"), "Kids"),
+    (re.compile(r"(?i)nolimit|odel|cotton collection|fashion"), "Dress"),
     (
         re.compile(
             r"(?i)\b(kfc|mcdonald|pizza|dominos|burger|subway|restaurant|cafe|coffee|dining|"
             r"bakery|bakers|baker|bar|pub|juice|lovers point)\b"
         ),
-        "Dining out",
+        "Day out",
     ),
-    (re.compile(r"(?i)hospital|pharmacy|osusala|healthguard|asiri|nawaloka|dental|clinic|\bhealth\b"), "Health care"),
-    (re.compile(r"(?i)netflix|spotify|youtube|cinema|movie|scope cinema|apple\.com|google play|steam"), "Entertainment"),
+    (re.compile(r"(?i)hospital|pharmacy|osusala|healthguard|asiri|nawaloka|dental|clinic|spa ceylon|\bhealth\b"), "Health"),
+    (re.compile(r"(?i)netflix|spotify|youtube|apple\.com|google play|steam"), "Subscriptions"),
+    (re.compile(r"(?i)cinema|movie|scope cinema"), "Day out"),
     (re.compile(r"(?i)\b(salary|payroll)\b"), "Salary"),
+    (re.compile(r"(?i)islamic|quran|qur'an|madrasa|madarasa|hifz"), "Islamic class"),
     (re.compile(r"(?i)school|university|tuition|college"), "Education"),
     (re.compile(r"(?i)\b(fund transfer|online transfer|ceft|slip transfer)\b"), "Transfers"),
 ]

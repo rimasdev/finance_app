@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
@@ -12,10 +13,11 @@ class ApiException implements Exception {
 }
 
 class ApiClient {
-  ApiClient({required this.baseUrl, this.token});
+  ApiClient({required this.baseUrl, this.token, http.Client? client}) : _client = client ?? http.Client();
 
   String baseUrl;
   String? token;
+  final http.Client _client;
 
   Future<dynamic> get(String path) => _send('GET', path);
   Future<dynamic> post(String path, [Map<String, dynamic>? body]) => _send('POST', path, body);
@@ -23,9 +25,7 @@ class ApiClient {
   Future<dynamic> delete(String path) => _send('DELETE', path);
 
   Future<String> exportCsv() async {
-    final response = await http
-        .get(_uri('/export.csv'), headers: _headers())
-        .timeout(const Duration(seconds: 20));
+    final response = await _request('GET', _uri('/export.csv'));
     if (response.statusCode >= 400) {
       throw ApiException(_message(response), response.statusCode);
     }
@@ -33,11 +33,30 @@ class ApiClient {
   }
 
   Future<dynamic> _send(String method, String path, [Map<String, dynamic>? body]) async {
-    final request = http.Request(method, _uri(path));
-    request.headers.addAll(_headers());
-    if (body != null) request.body = jsonEncode(body);
-    final streamed = await request.send().timeout(const Duration(seconds: 20));
-    final response = await http.Response.fromStream(streamed);
+    try {
+      return await _decode(await _request(method, _uri(path), body));
+    } on TimeoutException {
+      try {
+        return await _decode(await _request(method, _uri(path), body));
+      } on TimeoutException {
+        throw ApiException('Could not reach Takings. Check your connection and try again.', 0);
+      }
+    }
+  }
+
+  Future<http.Response> _request(String method, Uri uri, [Map<String, dynamic>? body]) {
+    final encoded = body == null ? null : jsonEncode(body);
+    final headers = _headers();
+    final Future<http.Response> response = switch (method) {
+      'POST' => _client.post(uri, headers: headers, body: encoded),
+      'PATCH' => _client.patch(uri, headers: headers, body: encoded),
+      'DELETE' => _client.delete(uri, headers: headers),
+      _ => _client.get(uri, headers: headers),
+    };
+    return response.timeout(const Duration(seconds: 30));
+  }
+
+  Future<dynamic> _decode(http.Response response) async {
     if (response.statusCode >= 400) {
       throw ApiException(_message(response), response.statusCode);
     }

@@ -367,12 +367,14 @@ class FolioStore extends ChangeNotifier {
     String name,
     String kind, {
     String icon = 'other',
+    String scope = 'personal',
     String? parentId,
   }) async {
     await api.post('/categories', {
       'name': name,
       'kind': kind,
       'icon': icon,
+      'scope': scope,
       'parent_id': ?parentId,
     });
     await refresh();
@@ -424,14 +426,18 @@ class FolioStore extends ChangeNotifier {
     await refresh();
   }
 
-  Future<void> reorderCategories(String kind, List<CategoryModel> ordered) async {
+  Future<void> reorderCategories(String kind, List<CategoryModel> ordered, {String scope = 'personal'}) async {
     final previous = categories;
-    final others = [for (final category in categories) if (category.kind != kind) category];
+    final others = [
+      for (final category in categories)
+        if (category.kind != kind || category.scope != scope) category,
+    ];
     categories = [...others, ...ordered];
     notifyListeners();
     try {
       await api.post('/categories/order', {
         'kind': kind,
+        'scope': scope,
         'items': [
           for (final category in ordered) {'id': category.id, 'parent_id': category.parentId},
         ],
@@ -469,12 +475,16 @@ class FolioStore extends ChangeNotifier {
 
   Future<void> createTransaction(Map<String, dynamic> body) async {
     await api.post('/transactions', body);
-    await refresh();
+    try {
+      await refresh();
+    } catch (_) {}
   }
 
   Future<void> updateTransaction(String id, Map<String, dynamic> body) async {
     await api.patch('/transactions/$id', body);
-    await refresh();
+    try {
+      await refresh();
+    } catch (_) {}
   }
 
   Future<void> linkTransactionRecurring(String id, String? recurringId) async {
@@ -530,6 +540,11 @@ class FolioStore extends ChangeNotifier {
 
   Future<void> createLoan(Map<String, dynamic> body) async {
     await api.post('/loans', body);
+    await refresh();
+  }
+
+  Future<void> updateLoan(String id, Map<String, dynamic> body) async {
+    await api.patch('/loans/$id', body);
     await refresh();
   }
 

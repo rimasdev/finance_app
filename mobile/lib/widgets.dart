@@ -136,49 +136,61 @@ class ChoiceChipRow extends StatelessWidget {
     required this.labels,
     required this.selected,
     required this.onSelect,
+    this.expand = false,
+    this.selectedColors,
+    this.selectedInks,
   });
 
   final List<String> labels;
   final int selected;
   final ValueChanged<int> onSelect;
+  final bool expand;
+  final List<Color>? selectedColors;
+  final List<Color>? selectedInks;
+
+  Widget _chip(int index) {
+    final chosen = index == selected;
+    final hasTone = selectedColors != null && index < selectedColors!.length;
+    final tone = hasTone ? selectedColors![index] : FolioColors.green;
+    final fill = chosen ? tone : FolioColors.card;
+    final ink = chosen
+        ? (selectedInks != null && index < selectedInks!.length ? selectedInks![index] : FolioColors.greenInk)
+        : FolioColors.text;
+    return GestureDetector(
+      onTap: () => onSelect(index),
+      child: Container(
+        alignment: expand ? Alignment.center : null,
+        padding: EdgeInsets.symmetric(horizontal: 14, vertical: expand ? 12 : 8),
+        decoration: BoxDecoration(
+          color: fill,
+          borderRadius: BorderRadius.circular(expand ? 8 : 20),
+          border: Border.all(color: chosen ? tone : FolioColors.line),
+        ),
+        child: Text(
+          labels[index],
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: ink,
+            fontWeight: FontWeight.w600,
+            fontSize: 13,
+          ),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
+    final children = [
+      for (var i = 0; i < labels.length; i++) ...[
+        if (i > 0) const SizedBox(width: 8),
+        if (expand) Expanded(child: _chip(i)) else _chip(i),
+      ],
+    ];
+    if (expand) return Row(children: children);
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
-      child: Row(
-        children: [
-          for (var i = 0; i < labels.length; i++) ...[
-            if (i > 0) const SizedBox(width: 8),
-            GestureDetector(
-              onTap: () => onSelect(i),
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 8,
-                ),
-                decoration: BoxDecoration(
-                  color: i == selected ? FolioColors.green : FolioColors.card,
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: i == selected ? FolioColors.green : FolioColors.line,
-                  ),
-                ),
-                child: Text(
-                  labels[i],
-                  style: TextStyle(
-                    color: i == selected
-                        ? FolioColors.greenInk
-                        : FolioColors.text,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 13,
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ],
-      ),
+      child: Row(children: children),
     );
   }
 }

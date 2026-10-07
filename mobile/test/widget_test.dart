@@ -32,6 +32,11 @@ void main() {
     final shifted = reorderCategoryList(displayCategories(items), 1, 3);
     expect(shifted.map((item) => item.id).toList(), ['groceries', 'outing', 'utilities', 'rice', 'phone']);
     expect(shifted[3].parentId, 'utilities');
+    final filed = reorderCategoryList(displayCategories(items), 2, 1);
+    expect(filed.firstWhere((item) => item.id == 'outing').parentId, 'groceries');
+    final group = reorderCategoryList(displayCategories(items), 3, 1);
+    expect(group.firstWhere((item) => item.id == 'utilities').parentId, 'groceries');
+    expect(group.firstWhere((item) => item.id == 'phone').parentId, 'groceries');
   });
 
   test('money formats rupees the way the ledger shows them', () {
@@ -169,11 +174,50 @@ void main() {
     await tester.pump();
     expect(find.text('From account'), findsOneWidget);
     expect(find.text('To account'), findsOneWidget);
+    expect(find.text('Rs. 1,000.00'), findsOneWidget);
+    expect(find.text('Rs. 200.00'), findsOneWidget);
 
     await tester.tap(find.text('Borrow'));
     await tester.pump();
     expect(find.text('Into account'), findsOneWidget);
     expect(find.text('From account'), findsWidgets);
+  });
+
+  testWidgets('an existing loan opens for editing', (tester) async {
+    final store = FolioStore();
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      ChangeNotifierProvider(
+        create: (_) => store,
+        child: MaterialApp(
+          theme: buildFolioTheme(),
+          home: LoanFormScreen(
+            existing: LoanModel(
+              id: 'loan',
+              kind: 'lend',
+              partyKind: 'person',
+              partyName: 'Brother',
+              counterpartyAccountId: null,
+              counterpartyAccountName: '',
+              accountId: '',
+              accountName: '',
+              amount: 179372,
+              repaid: 0,
+              remaining: 179372,
+              dueOn: '',
+              note: '',
+              settled: false,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Edit loan'), findsOneWidget);
+    expect(find.text('Brother'), findsOneWidget);
+    expect(find.text('179,372'), findsOneWidget);
+    expect(find.text('Save changes'), findsOneWidget);
   });
 
   testWidgets('an account card shows the bank logo', (tester) async {
@@ -303,8 +347,45 @@ void main() {
       ),
     );
     await tester.pump();
+    final expenseBox = tester.widget<Container>(
+      find.descendant(of: find.widgetWithText(GestureDetector, 'Expense'), matching: find.byType(Container)).first,
+    );
+    expect((expenseBox.decoration as BoxDecoration).borderRadius, BorderRadius.circular(8));
+    await tester.tap(find.text('Business'));
+    await tester.pump();
+    final businessBox = tester.widget<Container>(
+      find.descendant(of: find.widgetWithText(GestureDetector, 'Business'), matching: find.byType(Container)).first,
+    );
+    expect((businessBox.decoration as BoxDecoration).color, FolioColors.accent);
+    final personalBox = tester.widget<Container>(
+      find.descendant(of: find.widgetWithText(GestureDetector, 'Personal'), matching: find.byType(Container)).first,
+    );
+    final personalDecoration = personalBox.decoration as BoxDecoration;
+    final incomeBox = tester.widget<Container>(
+      find.descendant(of: find.widgetWithText(GestureDetector, 'Income'), matching: find.byType(Container)).first,
+    );
+    final incomeDecoration = incomeBox.decoration as BoxDecoration;
+    expect(personalDecoration.color, incomeDecoration.color);
+    expect((personalDecoration.border as Border).top.color, (incomeDecoration.border as Border).top.color);
+    await tester.tap(find.text('Personal'));
+    await tester.pump();
+    expect(
+      (tester.widget<Container>(
+        find.descendant(of: find.widgetWithText(GestureDetector, 'Personal'), matching: find.byType(Container)).first,
+      ).decoration as BoxDecoration).color,
+      FolioColors.accent,
+    );
+    final expense = tester.getRect(find.widgetWithText(GestureDetector, 'Expense'));
+    final income = tester.getRect(find.widgetWithText(GestureDetector, 'Income'));
+    final transfer = tester.getRect(find.widgetWithText(GestureDetector, 'Transfer'));
+    expect(expense.width, moreOrLessEquals(income.width, epsilon: 1));
+    expect(income.width, moreOrLessEquals(transfer.width, epsilon: 1));
+    expect(expense.left, 16);
+    expect(transfer.right, moreOrLessEquals(tester.getSize(find.byType(ListView)).width - 16, epsilon: 1));
     await tester.tap(find.text('Transfer'));
     await tester.pump();
+    expect(find.text('Personal'), findsOneWidget);
+    expect(find.text('Business'), findsOneWidget);
     expect(find.text('From account'), findsOneWidget);
     expect(find.text('To account'), findsOneWidget);
     expect(find.text('Description, optional'), findsOneWidget);
@@ -667,6 +748,30 @@ void main() {
     await tester.enterText(find.widgetWithText(TextField, 'Search categories'), 'pho');
     await tester.pump();
     expect(find.text('Phone'), findsOneWidget);
+    expect(find.text('Groceries'), findsNothing);
+  });
+
+  testWidgets('category filters are two dropdowns', (tester) async {
+    final store = FolioStore()
+      ..categories = [
+        CategoryModel(id: 'food', name: 'Groceries', kind: 'expense', icon: 'groceries', color: '#8ED4B0', transactionCount: 0),
+        CategoryModel(id: 'pay', name: 'Salary', kind: 'income', icon: 'income', color: '#8ED4B0', transactionCount: 0),
+      ];
+    await tester.pumpWidget(
+      ChangeNotifierProvider(
+        create: (_) => store,
+        child: MaterialApp(theme: buildFolioTheme(), home: const CategoriesScreen()),
+      ),
+    );
+    await tester.pump();
+    expect(find.byType(DropdownButtonFormField<String>), findsNWidgets(2));
+    expect(find.text('Groceries'), findsOneWidget);
+    expect(find.text('Salary'), findsNothing);
+    await tester.tap(find.text('Expense'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Income').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Salary'), findsOneWidget);
     expect(find.text('Groceries'), findsNothing);
   });
 }

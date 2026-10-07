@@ -91,6 +91,7 @@ class CategoryModel {
     required this.icon,
     required this.color,
     this.parentId,
+    this.scope = 'personal',
     required this.transactionCount,
   });
 
@@ -100,6 +101,7 @@ class CategoryModel {
   final String icon;
   final String color;
   final String? parentId;
+  final String scope;
   final int transactionCount;
 
   factory CategoryModel.fromJson(Map<String, dynamic> json) => CategoryModel(
@@ -109,6 +111,7 @@ class CategoryModel {
     icon: json['icon'] as String? ?? 'other',
     color: json['color'] as String? ?? '#9CA3AF',
     parentId: json['parent_id'] as String?,
+    scope: json['scope'] as String? ?? 'personal',
     transactionCount: json['transaction_count'] as int? ?? 0,
   );
 
@@ -120,6 +123,7 @@ class CategoryModel {
       icon: icon,
       color: color,
       parentId: clearParent ? null : (parentId ?? this.parentId),
+      scope: scope,
       transactionCount: transactionCount,
     );
   }

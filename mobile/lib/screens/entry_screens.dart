@@ -191,8 +191,26 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
       return;
     }
     if (_direction != 'transfer' && (_categoryId == null || _categoryId!.isEmpty)) {
-      showError(context, Exception('Choose a category'));
+      showError(context, Exception(_direction == 'income' ? 'Choose an income category' : 'Choose a category'));
       return;
+    }
+    if (_direction != 'transfer') {
+      final chosen = store.categories.where((category) => category.id == _categoryId).firstOrNull;
+      final scope = _business ? 'business' : 'personal';
+      if (chosen != null && chosen.kind != _direction) {
+        showError(
+          context,
+          Exception(_direction == 'income' ? 'That category is for expenses. Choose an income category.' : 'That category is for income. Choose an expense category.'),
+        );
+        return;
+      }
+      if (chosen != null && chosen.scope != scope) {
+        showError(
+          context,
+          Exception(scope == 'business' ? 'Choose a business category' : 'Choose a personal category'),
+        );
+        return;
+      }
     }
     if (charge < 0) {
       showError(context, Exception('Bank charges cannot be negative'));
@@ -308,15 +326,24 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
   Future<void> _addCategory(String kind) async {
     final created = await showDialog<String>(
       context: context,
-      builder: (context) => const _TextPrompt(title: 'New category', hint: 'Groceries, Spices, Shopping'),
+      builder: (context) => _TextPrompt(
+        title: 'New category',
+        hint: _business ? 'Stock, Rent, Staff' : 'Groceries, Spices, Shopping',
+      ),
     );
     if (created == null || created.isEmpty || !mounted) return;
     setState(() => _busy = true);
     try {
       final store = context.read<FolioStore>();
-      await store.createCategory(created, kind, icon: _iconForCategory(created));
+      final scope = _business ? 'business' : 'personal';
+      await store.createCategory(created, kind, icon: _iconForCategory(created), scope: scope);
       final match = store.categories
-          .where((category) => category.kind == kind && category.name.toLowerCase() == created.toLowerCase())
+          .where(
+            (category) =>
+                category.kind == kind &&
+                category.scope == scope &&
+                category.name.toLowerCase() == created.toLowerCase(),
+          )
           .firstOrNull;
       if (match != null && mounted) setState(() => _categoryId = match.id);
     } catch (error) {
@@ -535,7 +562,12 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
         _accountId = picked;
         if (_transferId == picked) _transferId = null;
         final account = store.accounts.where((item) => item.id == picked).firstOrNull;
-        if (account != null) _business = account.isBusiness;
+        if (account != null) {
+          _business = account.isBusiness;
+          final scope = _business ? 'business' : 'personal';
+          final chosen = store.categories.where((item) => item.id == _categoryId).firstOrNull;
+          if (chosen != null && chosen.scope != scope) _categoryId = null;
+        }
         if (_direction == 'transfer') _preferCash(store);
       }
     });
@@ -587,7 +619,8 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
   }
 
   Future<void> _openCategoryTray(FolioStore store, String kind) async {
-    final categories = store.categories.where((category) => category.kind == kind).toList();
+    final scope = _business ? 'business' : 'personal';
+    final categories = store.categories.where((category) => category.kind == kind && category.scope == scope).toList();
     final picked = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
@@ -796,6 +829,7 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
         children: [
           ChoiceChipRow(
+            expand: true,
             labels: const ['Expense', 'Income', 'Transfer'],
             selected: _direction == 'income'
                 ? 1
@@ -806,6 +840,20 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
               _direction = ['expense', 'income', 'transfer'][index];
               _categoryId = null;
               if (_direction == 'transfer') _preferCash(store);
+            }),
+          ),
+          const SizedBox(height: 10),
+          ChoiceChipRow(
+            expand: true,
+            labels: const ['Personal', 'Business'],
+            selectedColors: const [FolioColors.accent, FolioColors.accent],
+            selectedInks: const [FolioColors.accentInk, FolioColors.accentInk],
+            selected: _business ? 1 : 0,
+            onSelect: (index) => setState(() {
+              _business = index == 1;
+              final scope = _business ? 'business' : 'personal';
+              final chosen = store.categories.where((category) => category.id == _categoryId).firstOrNull;
+              if (chosen != null && chosen.scope != scope) _categoryId = null;
             }),
           ),
           const SizedBox(height: 28),
@@ -1086,13 +1134,6 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
               value: _hidden,
               activeThumbColor: FolioColors.green,
               onChanged: (value) => setState(() => _hidden = value),
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Business transaction'),
-              value: _business,
-              activeThumbColor: FolioColors.green,
-              onChanged: (value) => setState(() => _business = value),
             ),
           ],
           const SizedBox(height: 16),

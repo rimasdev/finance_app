@@ -705,6 +705,8 @@ class _AccountFormScreenState extends State<AccountFormScreen> {
           const SizedBox(height: 10),
           ChoiceChipRow(
             labels: const ['Personal', 'Business'],
+            selectedColors: const [FolioColors.accent, FolioColors.accent],
+            selectedInks: const [FolioColors.accentInk, FolioColors.accentInk],
             selected: _purpose == 'business' ? 1 : 0,
             onSelect: (index) =>
                 setState(() => _purpose = index == 1 ? 'business' : 'personal'),

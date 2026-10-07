@@ -130,6 +130,8 @@ class _TimelineScreenState extends State<TimelineScreen> {
               const SizedBox(height: 8),
               ChoiceChipRow(
                 labels: const ['All', 'Personal', 'Business'],
+                selectedColors: const [FolioColors.green, FolioColors.accent, FolioColors.accent],
+                selectedInks: const [FolioColors.greenInk, FolioColors.accentInk, FolioColors.accentInk],
                 selected: store.scope == 'business'
                     ? 2
                     : store.scope == 'personal'
