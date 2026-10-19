@@ -395,11 +395,28 @@ class _UpcomingRow extends StatelessWidget {
             SubscriptionMark(name: mark, size: 28),
             const SizedBox(width: 10),
             Expanded(
-              child: Text(
-                '${item.name}  →  ${item.currency == 'LKR' ? money(item.amount) : foreignAmount(item.currency, item.amount)}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontWeight: FontWeight.w600),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${item.name}  →  ${item.currency == 'LKR' ? money(item.amount) : foreignAmount(item.currency, item.amount)}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  Text(
+                    [
+                      if (item.kind == 'subscription') 'Subscription',
+                      if (item.kind == 'installment') 'Installment',
+                      if (item.kind == 'repeat') 'Repeat',
+                      if (item.accountName.isNotEmpty) item.accountName,
+                      if (item.provider.isNotEmpty) item.provider,
+                    ].join(' · '),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: FolioColors.muted, fontSize: 12),
+                  ),
+                ],
               ),
             ),
             const SizedBox(width: 8),
@@ -456,6 +473,121 @@ class _UpcomingScreen extends StatelessWidget {
 String _firstName(String name) {
   final parts = name.trim().split(RegExp(r'\s+')).where((part) => part.isNotEmpty);
   return parts.isEmpty ? '' : parts.first;
+}
+
+int _attentionCount(FolioStore store) {
+  final upcoming = store.recurring.where((item) {
+    if (!item.active) return false;
+    final days = _daysUntil(item.nextOn);
+    return days != null && days <= 7;
+  }).length;
+  return store.bills.length + upcoming + store.review.length;
+}
+
+class NotificationsScreen extends StatelessWidget {
+  const NotificationsScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final store = context.watch<FolioStore>();
+    final upcoming = store.recurring.where((item) {
+      if (!item.active) return false;
+      final days = _daysUntil(item.nextOn);
+      return days != null && days <= 7;
+    }).toList();
+    final empty = store.bills.isEmpty && upcoming.isEmpty && store.review.isEmpty;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Notifications')),
+      body: empty
+          ? const EmptyBlock(
+              icon: Icons.notifications_none,
+              title: 'No notifications',
+              body: 'Utility bills, payments coming up, and bank messages that need an account show up here.',
+            )
+          : ListView(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+              children: [
+                if (store.bills.isNotEmpty) ...[
+                  const _HomeLabel('UTILITY BILLS'),
+                  for (final bill in store.bills) ...[
+                    _BillCard(bill: bill),
+                    const SizedBox(height: 8),
+                  ],
+                ],
+                if (upcoming.isNotEmpty) ...[
+                  const _HomeLabel('COMING UP'),
+                  for (final item in upcoming) ...[
+                    FolioCard(child: _UpcomingRow(item: item)),
+                    const SizedBox(height: 8),
+                  ],
+                ],
+                if (store.review.isNotEmpty) ...[
+                  const _HomeLabel('BANK MESSAGES'),
+                  FolioCard(
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => unlinkedCardDigits(store).isEmpty
+                            ? const ReviewScreen()
+                            : const AccountsScreen(),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.sms_outlined, color: FolioColors.green),
+                        const SizedBox(width: 10),
+                        Expanded(child: Text(_reviewLabel(store))),
+                        const Icon(Icons.chevron_right, color: FolioColors.muted),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
+    );
+  }
+}
+
+class _BillCard extends StatelessWidget {
+  const _BillCard({required this.bill});
+
+  final UtilityBillModel bill;
+
+  @override
+  Widget build(BuildContext context) {
+    final due = DateTime.tryParse(bill.dueOn);
+    final today = DateTime.now();
+    final overdue = due != null && DateTime(due.year, due.month, due.day).isBefore(DateTime(today.year, today.month, today.day));
+    final total = bill.totalDue;
+    return FolioCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(bill.provider, style: const TextStyle(fontWeight: FontWeight.w700)),
+              ),
+              Text(money(bill.outstanding), style: const TextStyle(fontWeight: FontWeight.w700)),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            [
+              'Outstanding',
+              if (bill.accountNo.isNotEmpty) bill.accountNo,
+              if (bill.dueOn.isNotEmpty) 'Due ${bill.dueOn}',
+            ].join(' · '),
+            style: TextStyle(color: overdue ? FolioColors.red : FolioColors.muted, fontSize: 12),
+          ),
+          if (total != null && (total - bill.outstanding).abs() > 0.009) ...[
+            const SizedBox(height: 2),
+            Text('Total due ${money(total)}', style: const TextStyle(color: FolioColors.muted, fontSize: 12)),
+          ],
+        ],
+      ),
+    );
+  }
 }
 
 class _MiniStat extends StatelessWidget {
@@ -547,11 +679,16 @@ class DashboardScreen extends StatelessWidget {
                     ),
                   ),
                   IconButton(
+                    tooltip: 'Notifications',
                     onPressed: () => Navigator.push(
                       context,
-                      MaterialPageRoute(builder: (_) => const ExploreScreen()),
+                      MaterialPageRoute(builder: (_) => const NotificationsScreen()),
                     ),
-                    icon: const Icon(Icons.notifications_outlined, color: FolioColors.muted),
+                    icon: Badge(
+                      isLabelVisible: _attentionCount(store) > 0,
+                      label: Text('${_attentionCount(store)}'),
+                      child: const Icon(Icons.notifications_outlined, color: FolioColors.muted),
+                    ),
                   ),
                 ],
               ),
@@ -593,6 +730,13 @@ class DashboardScreen extends StatelessWidget {
                     ? store.recurring.where((item) => item.active).toList()
                     : const <RecurringModel>[],
               ),
+              if (store.bills.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                for (final bill in store.bills) ...[
+                  _BillCard(bill: bill),
+                  const SizedBox(height: 8),
+                ],
+              ],
               const SizedBox(height: 10),
               Row(
                 children: [

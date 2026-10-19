@@ -8,6 +8,7 @@ import '../store.dart';
 import '../subscriptions.dart';
 import '../theme.dart';
 import '../widgets.dart';
+import 'entry_screens.dart';
 import 'payee_screen.dart';
 
 const _kinds = ['repeat', 'installment', 'subscription'];
@@ -92,6 +93,152 @@ class _RecurringScreenState extends State<RecurringScreen> {
   }
 }
 
+Future<void> _recordPayment(BuildContext context, FolioStore store, RecurringModel item) async {
+  final amount = await showModalBottomSheet<double>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: FolioColors.bg,
+    builder: (context) => _DiscountPaymentSheet(item: item),
+  );
+  if (amount == null || !context.mounted) return;
+  try {
+    await store.payRecurring(item.id, amount: amount);
+  } catch (error) {
+    if (context.mounted) showError(context, error);
+  }
+}
+
+class _DiscountPaymentSheet extends StatefulWidget {
+  const _DiscountPaymentSheet({required this.item});
+
+  final RecurringModel item;
+
+  @override
+  State<_DiscountPaymentSheet> createState() => _DiscountPaymentSheetState();
+}
+
+class _DiscountPaymentSheetState extends State<_DiscountPaymentSheet> {
+  late final TextEditingController _amount;
+
+  @override
+  void initState() {
+    super.initState();
+    _amount = TextEditingController(text: groupedAmount(widget.item.amount));
+  }
+
+  @override
+  void dispose() {
+    _amount.dispose();
+    super.dispose();
+  }
+
+  String _shown(double value) {
+    final item = widget.item;
+    return item.currency == 'LKR' ? money(value) : foreignAmount(item.currency, value);
+  }
+
+  double? get _paid => double.tryParse(_amount.text.trim().replaceAll(',', ''));
+
+  String? get _discount {
+    final paid = _paid;
+    if (paid == null) return null;
+    final discount = widget.item.amount - paid;
+    if (discount <= 0.009) return null;
+    return 'Discount ${_shown(discount)}';
+  }
+
+  void _save() {
+    final paid = _paid;
+    if (paid == null || paid <= 0) {
+      showError(context, Exception('Add the amount paid'));
+      return;
+    }
+    Navigator.pop(context, paid);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final discount = _discount;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(16, 16, 16, 16 + MediaQuery.viewInsetsOf(context).bottom),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text('Record payment', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 8),
+          Text('Scheduled ${_shown(widget.item.amount)}', style: const TextStyle(color: FolioColors.muted)),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _amount,
+            autofocus: true,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            inputFormatters: const [GroupedAmountFormatter()],
+            decoration: const InputDecoration(labelText: 'Amount paid'),
+            onChanged: (_) => setState(() {}),
+          ),
+          if (discount != null) ...[
+            const SizedBox(height: 8),
+            Text(discount, style: const TextStyle(color: FolioColors.green)),
+            const SizedBox(height: 4),
+            Text(
+              'The next payment stays ${_shown(widget.item.amount)}.',
+              style: const TextStyle(color: FolioColors.muted, fontSize: 13),
+            ),
+          ],
+          const SizedBox(height: 16),
+          PrimaryButton(label: 'Save payment', onPressed: _save),
+        ],
+      ),
+    );
+  }
+}
+
+class _PaymentDetail extends StatelessWidget {
+  const _PaymentDetail({required this.item, required this.payment});
+
+  final RecurringModel item;
+  final TxnModel payment;
+
+  @override
+  Widget build(BuildContext context) {
+    final source = switch (payment.source) {
+      'sms' => 'SMS',
+      'recurring' => 'Recorded',
+      _ => 'Entered',
+    };
+    final discount = payment.note.contains('Discount') ? payment.note : '';
+    final lines = [
+      '${longDay(payment.occurredAt)} · ${clock(payment.occurredAt)}',
+      [
+        if (payment.accountName.isNotEmpty) payment.accountName,
+        source,
+        if (payment.categoryName.isNotEmpty) payment.categoryName,
+      ].join(' · '),
+      if (payment.merchant.isNotEmpty && payment.merchant != item.name) payment.merchant,
+      if (discount.isNotEmpty) discount,
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (var index = 0; index < lines.length; index++)
+          Text(
+            lines[index],
+            style: TextStyle(
+              color: index == 0
+                  ? FolioColors.text
+                  : lines[index].startsWith('Discount')
+                  ? FolioColors.green
+                  : FolioColors.muted,
+              fontSize: index == 0 ? 13 : 12,
+              fontWeight: index == 0 ? FontWeight.w600 : FontWeight.w500,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
 class _RecurringCard extends StatelessWidget {
   const _RecurringCard({required this.item});
   final RecurringModel item;
@@ -137,9 +284,35 @@ class _RecurringCard extends StatelessWidget {
             ].where((part) => part.isNotEmpty).join(' · '),
             style: const TextStyle(color: FolioColors.muted, fontSize: 12),
           ),
+          if (item.payments.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            const Text('Payments', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+            for (final payment in item.payments)
+              InkWell(
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => TransactionFormScreen(existing: payment),
+                  ),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: _PaymentDetail(item: item, payment: payment)),
+                      const SizedBox(width: 8),
+                      Text(money(payment.amount), style: const TextStyle(fontWeight: FontWeight.w600)),
+                      const Icon(Icons.chevron_right, size: 18, color: FolioColors.muted),
+                    ],
+                  ),
+                ),
+              ),
+          ],
           if (item.active) ...[
             const SizedBox(height: 8),
-            Row(
+            Wrap(
+              spacing: 4,
               children: [
                 TextButton(
                   onPressed: () => Navigator.push(
@@ -151,13 +324,7 @@ class _RecurringCard extends StatelessWidget {
                   child: const Text('Edit'),
                 ),
                 TextButton(
-                  onPressed: () async {
-                    try {
-                      await store.payRecurring(item.id);
-                    } catch (error) {
-                      if (context.mounted) showError(context, error);
-                    }
-                  },
+                  onPressed: () => _recordPayment(context, store, item),
                   child: const Text('Record payment'),
                 ),
                 TextButton(

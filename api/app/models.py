@@ -161,6 +161,22 @@ class Recurring(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class UtilityBill(Base):
+    __tablename__ = "utility_bills"
+    __table_args__ = (UniqueConstraint("user_id", "provider", "account_no", name="uq_utility_bill"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(40))
+    account_no: Mapped[str] = mapped_column(String(64), default="")
+    holder: Mapped[str] = mapped_column(String(80), default="")
+    outstanding: Mapped[float] = mapped_column(Numeric(14, 2))
+    due_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    total_due: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    monthly: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class Payee(Base):
     __tablename__ = "payees"
     __table_args__ = (UniqueConstraint("user_id", "name", "detail", name="uq_payee"),)

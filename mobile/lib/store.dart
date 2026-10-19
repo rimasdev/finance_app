@@ -38,6 +38,7 @@ class FolioStore extends ChangeNotifier {
   List<BudgetModel> budgets = [];
   List<LoanModel> loans = [];
   List<RecurringModel> recurring = [];
+  List<UtilityBillModel> bills = [];
   ExchangeRates? rates;
   bool showRecurringHome = false;
   List<TxnModel> review = [];
@@ -188,6 +189,7 @@ class FolioStore extends ChangeNotifier {
     budgets = [];
     loans = [];
     recurring = [];
+    bills = [];
     review = [];
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('token');
@@ -278,6 +280,15 @@ class FolioStore extends ChangeNotifier {
       recurring = [
         for (final row in recurringRows)
           RecurringModel.fromJson(row as Map<String, dynamic>),
+      ];
+      List<dynamic> billRows = const [];
+      try {
+        billRows = await api.get('/bills') as List;
+      } on ApiException catch (error) {
+        if (error.status != 404) rethrow;
+      }
+      bills = [
+        for (final row in billRows) UtilityBillModel.fromJson(row as Map<String, dynamic>),
       ];
       List<dynamic> payeeRows = const [];
       try {
@@ -487,8 +498,11 @@ class FolioStore extends ChangeNotifier {
     } catch (_) {}
   }
 
-  Future<void> linkTransactionRecurring(String id, String? recurringId) async {
-    await api.post('/transactions/$id/recurring', {'recurring_id': recurringId});
+  Future<void> linkTransactionRecurring(String id, String? recurringId, {bool discount = false}) async {
+    await api.post('/transactions/$id/recurring', {
+      'recurring_id': recurringId,
+      if (discount) 'discount': true,
+    });
     await refresh();
   }
 
@@ -553,6 +567,16 @@ class FolioStore extends ChangeNotifier {
     await refresh();
   }
 
+  Future<void> updateLoanPayment(String loanId, String paymentId, Map<String, dynamic> body) async {
+    await api.patch('/loans/$loanId/payments/$paymentId', body);
+    await refresh();
+  }
+
+  Future<void> deleteLoanPayment(String loanId, String paymentId) async {
+    await api.delete('/loans/$loanId/payments/$paymentId');
+    await refresh();
+  }
+
   Future<void> setRecurringOnHome(bool value) async {
     showRecurringHome = value;
     notifyListeners();
@@ -570,8 +594,8 @@ class FolioStore extends ChangeNotifier {
     await refresh();
   }
 
-  Future<void> payRecurring(String id) async {
-    await api.post('/recurring/$id/pay', {});
+  Future<void> payRecurring(String id, {double? amount}) async {
+    await api.post('/recurring/$id/pay', {if (amount != null) 'amount': amount});
     await refresh();
   }
 

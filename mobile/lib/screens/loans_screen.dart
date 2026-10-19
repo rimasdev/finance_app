@@ -406,6 +406,28 @@ class _LoanCard extends StatelessWidget {
               ),
             ),
           ],
+          if (loan.payments.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            for (final payment in loan.payments)
+              InkWell(
+                onTap: () => _editPayment(context, store, loan, payment),
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 6, right: 12),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          payment.accountName.isEmpty ? 'Payment' : payment.accountName,
+                          style: const TextStyle(color: FolioColors.muted, fontSize: 13),
+                        ),
+                      ),
+                      Text(money(payment.amount), style: const TextStyle(fontWeight: FontWeight.w600)),
+                      const Icon(Icons.chevron_right, size: 18, color: FolioColors.muted),
+                    ],
+                  ),
+                ),
+              ),
+          ],
           if (!loan.settled)
             Align(
               alignment: Alignment.centerRight,
@@ -487,63 +509,160 @@ class _LoanCard extends StatelessWidget {
     }
   }
 
-  Future<void> _recordPayment(
+  Future<void> _recordPayment(BuildContext context, FolioStore store, LoanModel loan) async {
+    final body = await _askPayment(context, loan);
+    if (body == null || !context.mounted) return;
+    try {
+      await store.repayLoan(loan.id, body);
+    } catch (error) {
+      if (context.mounted) showError(context, error);
+    }
+  }
+
+  Future<void> _editPayment(
     BuildContext context,
     FolioStore store,
     LoanModel loan,
+    LoanPaymentModel payment,
   ) async {
-    final amount = TextEditingController();
-    final saved = await showModalBottomSheet<bool>(
+    final body = await _askPayment(context, loan, payment: payment);
+    if (body == null || !context.mounted) return;
+    try {
+      if (body['delete'] == true) {
+        await store.deleteLoanPayment(loan.id, payment.id);
+      } else {
+        await store.updateLoanPayment(loan.id, payment.id, body);
+      }
+    } catch (error) {
+      if (context.mounted) showError(context, error);
+    }
+  }
+
+  Future<Map<String, dynamic>?> _askPayment(
+    BuildContext context,
+    LoanModel loan, {
+    LoanPaymentModel? payment,
+  }) {
+    return showModalBottomSheet<Map<String, dynamic>>(
       context: context,
       isScrollControlled: true,
       backgroundColor: FolioColors.bg,
-      builder: (context) => Padding(
-        padding: EdgeInsets.fromLTRB(
-          16,
-          16,
-          16,
-          16 + MediaQuery.viewInsetsOf(context).bottom,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              'Payment ${loan.isLend ? 'from' : 'to'} ${loan.partyName}',
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '${money(loan.remaining)} still open',
-              style: const TextStyle(color: FolioColors.muted),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: amount,
-              keyboardType: const TextInputType.numberWithOptions(
-                decimal: true,
-              ),
-              decoration: const InputDecoration(hintText: 'Amount'),
-            ),
-            const SizedBox(height: 16),
-            PrimaryButton(
-              label: 'Save payment',
-              onPressed: () => Navigator.pop(context, true),
-            ),
-          ],
-        ),
-      ),
+      builder: (context) => _PaymentSheet(loan: loan, payment: payment),
     );
-    if (saved != true || !context.mounted) return;
-    final value = double.tryParse(amount.text.trim().replaceAll(',', ''));
+  }
+}
+
+class _PaymentSheet extends StatefulWidget {
+  const _PaymentSheet({required this.loan, this.payment});
+
+  final LoanModel loan;
+  final LoanPaymentModel? payment;
+
+  @override
+  State<_PaymentSheet> createState() => _PaymentSheetState();
+}
+
+class _PaymentSheetState extends State<_PaymentSheet> {
+  late final TextEditingController _amount;
+  String? _accountId;
+
+  @override
+  void initState() {
+    super.initState();
+    final payment = widget.payment;
+    _amount = TextEditingController(text: payment == null ? '' : _grouped(payment.amount));
+    _accountId = payment == null || payment.accountId.isEmpty ? widget.loan.accountId : payment.accountId;
+    if (_accountId != null && _accountId!.isEmpty) _accountId = null;
+  }
+
+  @override
+  void dispose() {
+    _amount.dispose();
+    super.dispose();
+  }
+
+  String get _accountLabel => widget.loan.isLend ? 'Into account' : 'From account';
+
+  void _save(List<AccountModel> accounts) {
+    final value = double.tryParse(_amount.text.trim().replaceAll(',', ''));
     if (value == null || value <= 0) {
       showError(context, Exception('Add the amount paid'));
       return;
     }
-    try {
-      await store.repayLoan(loan.id, {'amount': value});
-    } catch (error) {
-      if (context.mounted) showError(context, error);
-    }
+    final chosen = _accountId != null && accounts.any((account) => account.id == _accountId) ? _accountId : null;
+    Navigator.pop(context, {'amount': value, if (chosen != null) 'account_id': chosen});
+  }
+
+  Future<void> _delete() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: FolioColors.card,
+        title: const Text('Delete this payment?'),
+        content: const Text('The amount goes back onto the loan, and the payment leaves the timeline.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete', style: TextStyle(color: FolioColors.red)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && mounted) Navigator.pop(context, {'delete': true});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final accounts = context.watch<FolioStore>().accounts;
+    final loan = widget.loan;
+    final editing = widget.payment != null;
+    final selected = accounts.any((account) => account.id == _accountId) ? _accountId : '';
+    return Padding(
+      padding: EdgeInsets.fromLTRB(16, 16, 16, 16 + MediaQuery.viewInsetsOf(context).bottom),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            editing ? 'Edit payment' : 'Payment ${loan.isLend ? 'from' : 'to'} ${loan.partyName}',
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '${money(loan.remaining)} still open',
+            style: const TextStyle(color: FolioColors.muted),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _amount,
+            autofocus: !editing,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            inputFormatters: const [GroupedAmountFormatter()],
+            decoration: const InputDecoration(hintText: 'Amount'),
+          ),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<String>(
+            initialValue: selected,
+            isExpanded: true,
+            dropdownColor: FolioColors.card,
+            decoration: InputDecoration(labelText: _accountLabel),
+            items: [
+              const DropdownMenuItem(value: '', child: Text('None')),
+              for (final account in accounts)
+                DropdownMenuItem(value: account.id, child: accountChoice(account)),
+            ],
+            onChanged: (value) => setState(() => _accountId = value == null || value.isEmpty ? null : value),
+          ),
+          const SizedBox(height: 16),
+          PrimaryButton(label: editing ? 'Save changes' : 'Save payment', onPressed: () => _save(accounts)),
+          if (editing)
+            TextButton(
+              onPressed: _delete,
+              child: const Text('Delete payment', style: TextStyle(color: FolioColors.red)),
+            ),
+        ],
+      ),
+    );
   }
 }
 
@@ -611,21 +730,7 @@ class _LoanFormScreenState extends State<LoanFormScreen> {
 
   String get _otherLabel => _kind == 'lend' ? 'To account' : 'From account';
 
-  Widget _accountChoice(AccountModel account) {
-    return Row(
-      children: [
-        Expanded(
-          child: Text(
-            '${account.name} · ${account.isBusiness ? 'Business' : 'Personal'}',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-        const SizedBox(width: 8),
-        Text(money(account.balance), style: const TextStyle(fontWeight: FontWeight.w600)),
-      ],
-    );
-  }
+  Widget _accountChoice(AccountModel account) => accountChoice(account);
 
   bool get _canPickContact =>
       !kIsWeb &&
@@ -879,6 +984,22 @@ class _LoanFormScreenState extends State<LoanFormScreen> {
       ),
     );
   }
+}
+
+Widget accountChoice(AccountModel account) {
+  return Row(
+    children: [
+      Expanded(
+        child: Text(
+          '${account.name} · ${account.isBusiness ? 'Business' : 'Personal'}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
+      const SizedBox(width: 8),
+      Text(money(account.balance), style: const TextStyle(fontWeight: FontWeight.w600)),
+    ],
+  );
 }
 
 String _grouped(double amount) {

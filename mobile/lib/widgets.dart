@@ -321,6 +321,14 @@ class TxnTile extends StatelessWidget {
                 clock(txn.occurredAt),
                 style: const TextStyle(color: FolioColors.muted, fontSize: 11),
               ),
+              if (txn.balance != null)
+                Text(
+                  money(txn.balance!, accounting: true),
+                  style: TextStyle(
+                    color: txn.balance! < 0 ? FolioColors.red : FolioColors.muted,
+                    fontSize: 11,
+                  ),
+                ),
             ],
           ),
         ],

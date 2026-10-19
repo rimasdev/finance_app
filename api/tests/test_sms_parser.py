@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
-from app.sms_parser import parse_sms
+from app.sms_parser import parse_sms, parse_utility
 
 
 def test_debit_with_merchant_and_balance():
@@ -99,3 +99,119 @@ def test_otp_is_ignored():
 def test_plain_chat_is_ignored():
     parsed = parse_sms("See you at 7")
     assert not parsed.recognized
+
+
+def test_an_electricity_bill_records_the_outstanding_and_due_date():
+    text = """A/C No: 8021065206 (D1)
+M.F.R. MOHAMED.
+
+B/F: Rs. 24,825.28
+Payments: Rs. 12,500.00
+Debits: Rs. 112.98
+Outstanding: Rs. 12,438.26 by 2026-10-04
+
+Reading Date: 2026-10-11 (458)
+Reading: 11173 - 11005 = 168 Units
+Charge: Rs. 5,692.00
+SSC Levy: Rs. 145.95
+Monthly Bill: Rs. 5,837.95
+
+Total Due: Rs. 18,276.21
+
+View e-Bill here:
+https://ebill.edl.lk/v1/example
+"""
+    bill = parse_utility(text)
+    assert bill is not None
+    assert bill.kind == "bill"
+    assert bill.provider == "Electricity"
+    assert bill.account_no == "8021065206"
+    assert bill.holder == "M.F.R. MOHAMED"
+    assert bill.outstanding == Decimal("12438.26")
+    assert bill.due_on == date(2026, 10, 4)
+    assert bill.monthly == Decimal("5837.95")
+    assert bill.total_due == Decimal("18276.21")
+    parsed = parse_sms(text)
+    assert not parsed.recognized
+    assert parsed.reason == "utility_bill"
+
+
+def test_an_nwsdb_bill_records_the_latest_total_due():
+    text = """*** NOTICE OF DISCONNECTION ***
+Please Settle Rs : 5896.32 Within 2 Days from the date of issuance.Otherwise supply will be disconnected.
+
+Bill Ref : 2026/10
+A/C No : 42/12/138/027/11 (10)
+MR. M.J.M. FLYIL
+
+Balance B/F (Rs) : 5896.32
+Period : 01-08-2026 to 01-09-2026
+Monthly Charges : Rs. 3254.83
+Total Due : Rs. 5896.32
+
+Period : 01-09-2026 to 01-10-2026
+Water Charge (Before Taxes) (Rs) : 2650.00
+Monthly Charges : Rs. 3204.93
+Total Due : Rs. 9101.25
+
+pl. settle within 14 days to earn rebate,
+NWSDB
+https://ebis.waterboard.lk/ebill/?key=onxaZJ0f3w
+"""
+    bill = parse_utility(text)
+    assert bill is not None
+    assert bill.kind == "bill"
+    assert bill.provider == "Water"
+    assert bill.account_no == "42/12/138/027/11"
+    assert bill.holder == "MR. M.J.M. FLYIL"
+    assert bill.outstanding == Decimal("9101.25")
+    assert bill.total_due == Decimal("9101.25")
+    assert bill.monthly == Decimal("3204.93")
+    assert bill.due_on == date(2026, 10, 15)
+    parsed = parse_sms(text)
+    assert not parsed.recognized
+    assert parsed.reason == "utility_bill"
+    notice = parse_utility(
+        "*** NOTICE OF DISCONNECTION ***\nPlease Settle Rs : 5896.32 Within 2 Days from the date of issuance."
+        "Otherwise supply will be disconnected."
+    )
+    assert notice is not None
+    assert notice.kind == "notice"
+
+
+def test_a_phone_bill_is_a_utility_and_a_dialog_debit_is_phone():
+    text = """HUTCH Bill for 94725742238
+Invoice Period: 01-09-26 to 30-09-26
+Amount Due: Rs. 1890.00
+Please pay before 15-10-2026
+"""
+    bill = parse_utility(text)
+    assert bill is not None
+    assert bill.kind == "bill"
+    assert bill.provider == "Hutch"
+    assert bill.account_no == "94725742238"
+    assert bill.outstanding == Decimal("1890.00")
+    assert bill.due_on == date(2026, 10, 15)
+    assert parse_sms(text).reason == "utility_bill"
+    debit = parse_sms("LKR 2,000.00 debited from A/c XX3390 on 02/09/2026. Info: DIALOG")
+    assert debit.recognized
+    assert debit.category_hint == "Phone"
+    power = parse_sms("Rs. 500.00 debited. Info: LECO")
+    assert power.category_hint == "Electricity"
+
+
+def test_a_water_notice_and_a_payment_receipt_are_not_transactions():
+    notice = "A/C No 42/12/138/027/11, Dear Customer, Water supply of your area will be interrupted from 2026.09.25."
+    parsed_notice = parse_utility(notice)
+    assert parsed_notice is not None
+    assert parsed_notice.kind == "notice"
+    assert not parse_sms(notice).recognized
+    receipt = (
+        "Dear customer, we have received your payment of Rs.6000.0 for "
+        "account number 42/12/138/027/11 from COM BANK on 2026-10-02, Thank you - NWSDB"
+    )
+    parsed_receipt = parse_utility(receipt)
+    assert parsed_receipt is not None
+    assert parsed_receipt.kind == "payment"
+    assert parsed_receipt.account_no == "42/12/138/027/11"
+    assert not parse_sms(receipt).recognized

@@ -17,6 +17,16 @@ import '../theme.dart';
 import '../widgets.dart';
 import 'payee_screen.dart';
 
+String _billSaved(Object? bill) {
+  if (bill is! Map) return 'Saved the utility bill.';
+  final provider = (bill['provider'] as String? ?? 'utility').toLowerCase();
+  final outstanding = (bill['outstanding'] as num?)?.toDouble();
+  final due = bill['due_on'] as String? ?? '';
+  final amount = outstanding == null ? '' : ' ${money(outstanding)}';
+  final when = due.isEmpty ? '' : ', due $due';
+  return 'Saved the $provider bill. Outstanding$amount$when.';
+}
+
 class _CategoryGroup {
   _CategoryGroup(this.parent, this.children);
 
@@ -58,6 +68,7 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
   String _currency = 'LKR';
   double? _fxAmount;
   String _recurringId = '';
+  bool _linkAsDiscount = false;
   var _settledTouched = false;
   String _location = '';
   final _note = TextEditingController();
@@ -261,6 +272,13 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
         }
       } else {
         await store.updateTransaction(existing.id, body);
+        if (existing.recurringId != _recurringId) {
+          await store.linkTransactionRecurring(
+            existing.id,
+            _recurringId.isEmpty ? null : _recurringId,
+            discount: _linkAsDiscount,
+          );
+        }
       }
       if (mounted) Navigator.pop(context);
     } catch (error) {
@@ -458,6 +476,13 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
     final existing = widget.existing;
     if (existing == null) return;
     final plans = store.recurring.where((item) => item.active).toList();
+    double paidFor(RecurringModel plan) {
+      if (plan.currency != 'LKR' && existing.fxAmount != null && existing.currency == plan.currency) {
+        return existing.fxAmount!;
+      }
+      return existing.amount;
+    }
+
     final picked = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: FolioColors.bg,
@@ -480,7 +505,9 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 title: Text(item.name),
-                subtitle: Text(item.currency == 'LKR' ? money(item.amount) : foreignAmount(item.currency, item.amount)),
+                subtitle: Text(
+                  item.currency == 'LKR' ? money(item.amount) : foreignAmount(item.currency, item.amount),
+                ),
                 onTap: () => Navigator.pop(context, item.id),
               ),
           ],
@@ -488,9 +515,53 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
       ),
     );
     if (picked == null || !mounted) return;
+    final plan = plans.where((item) => item.id == picked).firstOrNull;
+    var discount = false;
+    if (plan != null && (plan.kind == 'installment' || plan.kind == 'subscription')) {
+      final gap = plan.amount - paidFor(plan);
+      if (gap > 0.009) {
+        final paidLabel = plan.currency == 'LKR' ? money(paidFor(plan)) : foreignAmount(plan.currency, paidFor(plan));
+        final planLabel = plan.currency == 'LKR' ? money(plan.amount) : foreignAmount(plan.currency, plan.amount);
+        final discountLabel = plan.currency == 'LKR' ? money(gap) : foreignAmount(plan.currency, gap);
+        final yes = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            backgroundColor: FolioColors.card,
+            title: const Text('Is this a discount?'),
+            content: Text('This payment is $paidLabel. ${plan.name} is $planLabel. The difference is $discountLabel.'),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('No')),
+              TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Yes')),
+            ],
+          ),
+        );
+        if (!mounted) return;
+        if (yes != true) {
+          showError(context, Exception('A different amount can only be linked when it is a discount.'));
+          return;
+        }
+        discount = true;
+      } else if (gap < -0.009) {
+        showError(context, Exception('This payment is higher than the installment, so it cannot be linked.'));
+        return;
+      }
+    }
     try {
-      await store.linkTransactionRecurring(existing.id, picked.isEmpty ? null : picked);
-      if (mounted) setState(() => _recurringId = picked);
+      await store.linkTransactionRecurring(existing.id, picked.isEmpty ? null : picked, discount: discount);
+      if (!mounted) return;
+      if (discount && plan != null) {
+        final currency = plan.currency.toUpperCase();
+        final shown = (plan.amount - paidFor(plan)).toStringAsFixed(2);
+        final label = currency == 'LKR' ? 'Discount $shown' : 'Discount $currency $shown';
+        final note = _note.text.trim();
+        if (!note.contains(label)) {
+          _note.text = note.isEmpty ? label : '$note · $label';
+        }
+      }
+      setState(() {
+        _recurringId = picked;
+        _linkAsDiscount = discount;
+      });
     } catch (error) {
       if (mounted) showError(context, error);
     }
@@ -938,7 +1009,7 @@ class _TransactionFormScreenState extends State<TransactionFormScreen> {
                   ),
                   _PayRow(
                     tooltip: 'To account',
-                    icon: Icons.savings_rounded,
+                    icon: Icons.account_balance_rounded,
                     color: const Color(0xFF7EB6FF),
                     label: 'To account',
                     value: destination?.name ?? 'Choose',
@@ -1384,6 +1455,7 @@ class _SmsSheetState extends State<_SmsSheet> {
         'posted' => 'Added from the bank message.',
         'needs_review' => 'Saved. Pick an account for it from the dashboard.',
         'duplicate' => 'That message is already in Takings.',
+        'bill' => _billSaved(result['bill']),
         _ => 'This does not look like a bank debit or credit.',
       };
       ScaffoldMessenger.of(context)
@@ -1635,10 +1707,11 @@ class _SmsScreenState extends State<SmsScreen> {
             'Added ${txn?['merchant'] ?? 'transaction'} to ${txn?['account_name'] ?? 'an account'}.',
           'needs_review' => 'Saved. Pick an account for it from the dashboard.',
           'duplicate' => 'That message is already in Takings.',
+          'bill' => _billSaved(result['bill']),
           _ => 'This does not look like a bank debit or credit.',
         };
       });
-      if (status == 'posted' || status == 'needs_review') _body.clear();
+      if (status == 'posted' || status == 'needs_review' || status == 'bill') _body.clear();
     } catch (error) {
       if (mounted) showError(context, error);
     } finally {

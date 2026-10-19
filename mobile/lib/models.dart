@@ -176,6 +176,7 @@ class TxnModel {
     this.hidden = false,
     this.cardLast4 = '',
     this.recurringId = '',
+    this.balance,
   });
 
   final String id;
@@ -207,6 +208,7 @@ class TxnModel {
   final bool hidden;
   final String cardLast4;
   final String recurringId;
+  final double? balance;
 
   bool get isBusiness => scope == 'business';
 
@@ -251,6 +253,7 @@ class TxnModel {
     hidden: json['hidden'] as bool? ?? false,
     cardLast4: json['card_last4'] as String? ?? '',
     recurringId: json['recurring_id'] as String? ?? '',
+    balance: (json['balance'] as num?)?.toDouble(),
   );
 }
 
@@ -372,15 +375,17 @@ class InsightsData {
 }
 
 class TimelineDay {
-  TimelineDay({required this.date, required this.total, required this.items});
+  TimelineDay({required this.date, required this.total, required this.items, this.balance = 0});
 
   final DateTime date;
   final double total;
+  final double balance;
   final List<TxnModel> items;
 
   factory TimelineDay.fromJson(Map<String, dynamic> json) => TimelineDay(
     date: DateTime.parse(json['date'] as String),
     total: (json['total'] as num).toDouble(),
+    balance: (json['balance'] as num?)?.toDouble() ?? 0,
     items: [
       for (final row in json['items'] as List? ?? [])
         TxnModel.fromJson(row as Map<String, dynamic>),
@@ -444,6 +449,7 @@ class RecurringModel {
     required this.installmentsDone,
     required this.active,
     required this.note,
+    this.payments = const [],
   });
 
   final String id;
@@ -460,6 +466,7 @@ class RecurringModel {
   final int installmentsDone;
   final bool active;
   final String note;
+  final List<TxnModel> payments;
 
   factory RecurringModel.fromJson(Map<String, dynamic> json) {
     final rawNote = json['note'] as String? ?? '';
@@ -491,8 +498,45 @@ class RecurringModel {
       installmentsDone: json['installments_done'] as int? ?? 0,
       active: json['active'] as bool? ?? true,
       note: note,
+      payments: [
+        for (final row in json['payments'] as List? ?? const [])
+          TxnModel.fromJson(row as Map<String, dynamic>),
+      ],
     );
   }
+}
+
+class UtilityBillModel {
+  UtilityBillModel({
+    required this.id,
+    required this.provider,
+    required this.accountNo,
+    required this.holder,
+    required this.outstanding,
+    required this.dueOn,
+    this.totalDue,
+    this.monthly,
+  });
+
+  final String id;
+  final String provider;
+  final String accountNo;
+  final String holder;
+  final double outstanding;
+  final String dueOn;
+  final double? totalDue;
+  final double? monthly;
+
+  factory UtilityBillModel.fromJson(Map<String, dynamic> json) => UtilityBillModel(
+    id: json['id'] as String,
+    provider: json['provider'] as String? ?? 'Utility',
+    accountNo: json['account_no'] as String? ?? '',
+    holder: json['holder'] as String? ?? '',
+    outstanding: (json['outstanding'] as num?)?.toDouble() ?? 0,
+    dueOn: json['due_on'] as String? ?? '',
+    totalDue: (json['total_due'] as num?)?.toDouble(),
+    monthly: (json['monthly'] as num?)?.toDouble(),
+  );
 }
 
 class BudgetModel {
@@ -537,6 +581,30 @@ class BudgetModel {
   );
 }
 
+class LoanPaymentModel {
+  LoanPaymentModel({
+    required this.id,
+    required this.amount,
+    required this.accountId,
+    required this.accountName,
+    required this.occurredAt,
+  });
+
+  final String id;
+  final double amount;
+  final String accountId;
+  final String accountName;
+  final String occurredAt;
+
+  factory LoanPaymentModel.fromJson(Map<String, dynamic> json) => LoanPaymentModel(
+    id: json['id'] as String,
+    amount: (json['amount'] as num?)?.toDouble() ?? 0,
+    accountId: json['account_id'] as String? ?? '',
+    accountName: json['account_name'] as String? ?? '',
+    occurredAt: json['occurred_at'] as String? ?? '',
+  );
+}
+
 class LoanModel {
   LoanModel({
     required this.id,
@@ -553,6 +621,7 @@ class LoanModel {
     required this.dueOn,
     required this.note,
     required this.settled,
+    this.payments = const [],
   });
 
   final String id;
@@ -569,6 +638,7 @@ class LoanModel {
   final String dueOn;
   final String note;
   final bool settled;
+  final List<LoanPaymentModel> payments;
 
   bool get isLend => kind == 'lend';
 
@@ -587,5 +657,9 @@ class LoanModel {
     dueOn: json['due_on'] as String? ?? '',
     note: json['note'] as String? ?? '',
     settled: json['settled'] as bool? ?? false,
+    payments: [
+      for (final row in (json['payments'] as List?) ?? const [])
+        LoanPaymentModel.fromJson(row as Map<String, dynamic>),
+    ],
   );
 }

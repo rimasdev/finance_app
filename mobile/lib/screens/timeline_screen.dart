@@ -70,12 +70,12 @@ class _TimelineScreenState extends State<TimelineScreen> {
                           )
                         : Align(
                             alignment: Alignment.centerLeft,
-                            child: PopupMenuButton<String?>(
-                              initialValue: store.accountFilter,
-                              onSelected: store.setAccountFilter,
+                            child: PopupMenuButton<String>(
+                              initialValue: store.accountFilter ?? '',
+                              onSelected: (value) => store.setAccountFilter(value.isEmpty ? null : value),
                               itemBuilder: (context) => [
                                 const PopupMenuItem(
-                                  value: null,
+                                  value: '',
                                   child: Text('All accounts'),
                                 ),
                                 for (final account in store.accounts)
@@ -197,8 +197,8 @@ class _TimelineScreenState extends State<TimelineScreen> {
                           ),
                         ),
                         Text(
-                          money(day.total),
-                          style: const TextStyle(color: FolioColors.muted),
+                          money(day.balance, accounting: true),
+                          style: TextStyle(color: day.balance < 0 ? FolioColors.red : FolioColors.muted),
                         ),
                       ],
                     ),
@@ -217,6 +217,7 @@ class _TimelineScreenState extends State<TimelineScreen> {
                           );
                           return;
                         }
+                        final repayment = txn.merchant.startsWith('Repayment');
                         final removed = await showModalBottomSheet<bool>(
                           context: context,
                           backgroundColor: FolioColors.card,
@@ -227,19 +228,20 @@ class _TimelineScreenState extends State<TimelineScreen> {
                                 ListTile(
                                   title: Text(txn.title),
                                   subtitle: Text(
-                                    txn.note.isEmpty
-                                        ? txn.categoryName
-                                        : txn.note,
+                                    repayment
+                                        ? 'Deleting this removes the payment only. The loan stays.'
+                                        : 'This is the loan itself. It stays here. Delete a payment from the loan if the amount was wrong.',
                                   ),
                                 ),
-                                ListTile(
-                                  leading: const Icon(
-                                    Icons.delete_outline,
-                                    color: FolioColors.red,
+                                if (repayment)
+                                  ListTile(
+                                    leading: const Icon(
+                                      Icons.delete_outline,
+                                      color: FolioColors.red,
+                                    ),
+                                    title: const Text('Delete payment'),
+                                    onTap: () => Navigator.pop(context, true),
                                   ),
-                                  title: const Text('Delete'),
-                                  onTap: () => Navigator.pop(context, true),
-                                ),
                               ],
                             ),
                           ),

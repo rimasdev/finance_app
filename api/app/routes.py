@@ -2,7 +2,8 @@ import csv
 import io
 import json
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from decimal import Decimal
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -15,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import decode_token, hash_password, make_token, verify_password
 from app.db import get_db
-from app.models import Account, Budget, Category, Loan, LoanPayment, Payee, Recurring, Transaction, User, utcnow
+from app.models import Account, Budget, Category, Loan, LoanPayment, Payee, Recurring, Transaction, User, UtilityBill, utcnow
 from app.oauth import OAuthError, verify_apple_id_token, verify_google_id_token
 from app.sms_parser import parse_sms
 from app.services import (
@@ -41,6 +42,7 @@ from app.services import (
     timeline,
     txn_json,
     user_json,
+    utility_bill_json,
 )
 
 router = APIRouter()
@@ -504,6 +506,7 @@ def patch_me(body: MePatch, user: User = Depends(current_user), db: Session = De
 
 @router.delete("/me")
 def delete_me(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    db.query(UtilityBill).filter_by(user_id=user.id).delete()
     db.query(Payee).filter_by(user_id=user.id).delete()
     db.query(Budget).filter_by(user_id=user.id).delete()
     db.query(Recurring).filter_by(user_id=user.id).delete()
@@ -1089,12 +1092,15 @@ def delete_transaction(txn_id: str, user: User = Depends(current_user), db: Sess
     if txn is None or txn.user_id != user.id:
         raise HTTPException(404, "Transaction not found")
     if txn.loan_id:
-        raise HTTPException(400, "This entry belongs to a loan. Record a repayment, or delete the loan.")
+        if not (txn.merchant or "").startswith("Repayment"):
+            raise HTTPException(400, "This is the loan itself. Delete a payment from the loan if the amount was wrong.")
+        payment = _payment_for_transaction(db, txn)
+        if payment is not None:
+            db.delete(payment)
     if txn.recurring_id:
         plan = db.get(Recurring, txn.recurring_id)
-        when = txn.occurred_at.date() if isinstance(txn.occurred_at, datetime) else txn.occurred_at
-        if plan is not None and plan.user_id == user.id and (txn.source == "recurring" or _paid_this_cycle(plan, when)):
-            _unmark_paid(plan)
+        if plan is not None and plan.user_id == user.id:
+            _release_plan(db, user, plan, txn)
     db.delete(txn)
     db.commit()
     return {"deleted": True}
@@ -1102,6 +1108,7 @@ def delete_transaction(txn_id: str, user: User = Depends(current_user), db: Sess
 
 class RecurringLinkIn(BaseModel):
     recurring_id: str | None = None
+    discount: bool = False
 
 
 @router.post("/transactions/{txn_id}/recurring")
@@ -1114,11 +1121,10 @@ def link_transaction_recurring(
     txn = db.get(Transaction, txn_id)
     if txn is None or txn.user_id != user.id:
         raise HTTPException(404, "Transaction not found")
-    when = txn.occurred_at.date() if isinstance(txn.occurred_at, datetime) else txn.occurred_at
     if txn.recurring_id:
         previous = db.get(Recurring, txn.recurring_id)
-        if previous is not None and previous.user_id == user.id and _paid_this_cycle(previous, when):
-            _unmark_paid(previous)
+        if previous is not None and previous.user_id == user.id:
+            _release_plan(db, user, previous, txn)
         txn.recurring_id = None
     if body.recurring_id:
         plan = db.get(Recurring, body.recurring_id)
@@ -1126,16 +1132,26 @@ def link_transaction_recurring(
             raise HTTPException(404, "Recurring item not found")
         if not plan.active:
             raise HTTPException(400, "This series is finished")
+        if not _link_amount_allowed(plan, txn, confirmed_discount=body.discount):
+            raise HTTPException(400, "That amount does not match this payment")
+        if body.discount:
+            _remember_discount(plan, txn)
         txn.recurring_id = plan.id
-        if (
-            plan.next_on is not None
-            and when is not None
-            and plan.next_on - timedelta(days=5) <= when <= plan.next_on + timedelta(days=20)
-        ):
-            _mark_paid(plan)
+        _mark_paid(plan)
     db.commit()
     db.refresh(txn)
     return txn_json(txn, account_map(db, user.id), category_map(db, user.id))
+
+
+@router.get("/bills")
+def list_bills(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    rows = (
+        db.query(UtilityBill)
+        .filter_by(user_id=user.id)
+        .order_by(UtilityBill.due_on, UtilityBill.updated_at)
+        .all()
+    )
+    return [utility_bill_json(row) for row in rows]
 
 
 @router.post("/sms/ingest")
@@ -1202,9 +1218,11 @@ def _post_loan_movement(
     reverse: bool,
     account_override: str | None,
     occurred_at: datetime,
+    *,
+    always: bool = False,
 ) -> None:
     out_id, in_id = _movement_accounts(loan, reverse, account_override)
-    if out_id is None and in_id is None:
+    if out_id is None and in_id is None and not always:
         return
     anchor = db.get(Account, in_id) if in_id else None
     if anchor is None and out_id:
@@ -1233,11 +1251,99 @@ def _loan_or_404(db: Session, user: User, loan_id: str) -> Loan:
     return loan
 
 
+def _ensure_repayment_transactions(db: Session, user: User, loan: Loan) -> bool:
+    """A repayment with no account still belongs on the timeline."""
+    payments = _loan_payments(db, loan.id)
+    existing = [
+        row
+        for row in db.query(Transaction).filter_by(user_id=user.id, loan_id=loan.id).all()
+        if (row.merchant or "").startswith("Repayment")
+    ]
+    used: set[str] = set()
+    created = False
+    for payment in payments:
+        match = next(
+            (
+                row
+                for row in existing
+                if row.id not in used
+                and Decimal(str(row.amount)) == Decimal(str(payment.amount))
+                and row.occurred_at == payment.occurred_at
+            ),
+            None,
+        )
+        if match is None:
+            same_amount = [
+                row
+                for row in existing
+                if row.id not in used and Decimal(str(row.amount)) == Decimal(str(payment.amount))
+            ]
+            match = same_amount[0] if same_amount else None
+        if match is not None:
+            used.add(match.id)
+            continue
+        _post_loan_movement(
+            db,
+            user,
+            loan,
+            Decimal(str(payment.amount)),
+            True,
+            payment.account_id,
+            payment.occurred_at,
+            always=True,
+        )
+        created = True
+    return created
+
+
+def _loan_payments(db: Session, loan_id: str) -> list[LoanPayment]:
+    return (
+        db.query(LoanPayment)
+        .filter_by(loan_id=loan_id)
+        .order_by(LoanPayment.occurred_at, LoanPayment.id)
+        .all()
+    )
+
+
+def _loan_response(db: Session, loan: Loan) -> dict:
+    payments = _loan_payments(db, loan.id)
+    repaid = sum((Decimal(str(row.amount)) for row in payments), Decimal("0"))
+    return loan_json(loan, account_map(db, loan.user_id), repaid, payments)
+
+
+def _payment_for_transaction(db: Session, txn: Transaction) -> LoanPayment | None:
+    if not txn.loan_id:
+        return None
+    payments = [
+        row
+        for row in _loan_payments(db, txn.loan_id)
+        if Decimal(str(row.amount)) == Decimal(str(txn.amount))
+    ]
+    timed = [row for row in payments if row.occurred_at == txn.occurred_at]
+    if timed:
+        return timed[0]
+    return payments[0] if len(payments) == 1 else None
+
+
+def _payment_transaction(db: Session, user: User, payment: LoanPayment) -> Transaction | None:
+    rows = [
+        row
+        for row in db.query(Transaction).filter_by(user_id=user.id, loan_id=payment.loan_id).all()
+        if (row.merchant or "").startswith("Repayment")
+        and Decimal(str(row.amount)) == Decimal(str(payment.amount))
+    ]
+    timed = [row for row in rows if row.occurred_at == payment.occurred_at]
+    if timed:
+        return timed[0]
+    return rows[0] if rows else None
+
+
 @router.get("/loans")
 def list_loans(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    accounts = account_map(db, user.id)
     rows = db.query(Loan).filter_by(user_id=user.id).all()
-    payload = [loan_json(row, accounts, _repaid(db, row.id)) for row in rows]
+    if any(_ensure_repayment_transactions(db, user, row) for row in rows):
+        db.commit()
+    payload = [_loan_response(db, row) for row in rows]
     payload.sort(key=lambda row: (row["settled"], row["due_on"] or "9999-12-31"))
     return payload
 
@@ -1342,7 +1448,7 @@ def create_loan(body: LoanIn, user: User = Depends(current_user), db: Session = 
         _post_loan_movement(db, user, loan, body.amount, False, None, loan.opened_at)
     db.commit()
     db.refresh(loan)
-    return loan_json(loan, account_map(db, user.id), Decimal("0"))
+    return _loan_response(db, loan)
 
 
 @router.patch("/loans/{loan_id}")
@@ -1364,7 +1470,7 @@ def update_loan(loan_id: str, body: LoanIn, user: User = Depends(current_user), 
     _sync_loan_transactions(db, user, loan, previous_account_id)
     db.commit()
     db.refresh(loan)
-    return loan_json(loan, account_map(db, user.id), repaid)
+    return _loan_response(db, loan)
 
 
 @router.post("/loans/{loan_id}/payments")
@@ -1392,9 +1498,58 @@ def repay_loan(
         occurred_at=when.replace(tzinfo=None),
     )
     db.add(payment)
-    _post_loan_movement(db, user, loan, body.amount, True, account_override, payment.occurred_at)
+    _post_loan_movement(db, user, loan, body.amount, True, account_override, payment.occurred_at, always=True)
     db.commit()
-    return loan_json(loan, account_map(db, user.id), _repaid(db, loan.id))
+    return _loan_response(db, loan)
+
+
+@router.patch("/loans/{loan_id}/payments/{payment_id}")
+def update_loan_payment(
+    loan_id: str,
+    payment_id: str,
+    body: LoanPaymentIn,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    loan = _loan_or_404(db, user, loan_id)
+    payment = db.get(LoanPayment, payment_id)
+    if payment is None or payment.loan_id != loan.id or payment.user_id != user.id:
+        raise HTTPException(404, "Payment not found")
+    others = _repaid(db, loan.id) - Decimal(str(payment.amount))
+    if body.amount > Decimal(str(loan.amount)) - others:
+        raise HTTPException(400, "That is more than the amount still owed")
+    account_override = None
+    if body.account_id:
+        account_override = _owned_account(db, user, body.account_id).id
+    txn = _payment_transaction(db, user, payment)
+    payment.amount = body.amount
+    payment.account_id = account_override or loan.account_id
+    pay_out, pay_in = _movement_accounts(loan, True, account_override)
+    if txn is None:
+        _post_loan_movement(db, user, loan, body.amount, True, account_override, payment.occurred_at, always=True)
+    else:
+        _apply_loan_txn(db, txn, loan, pay_out, pay_in, body.amount, True)
+    db.commit()
+    return _loan_response(db, loan)
+
+
+@router.delete("/loans/{loan_id}/payments/{payment_id}")
+def delete_loan_payment(
+    loan_id: str,
+    payment_id: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    loan = _loan_or_404(db, user, loan_id)
+    payment = db.get(LoanPayment, payment_id)
+    if payment is None or payment.loan_id != loan.id or payment.user_id != user.id:
+        raise HTTPException(404, "Payment not found")
+    txn = _payment_transaction(db, user, payment)
+    if txn is not None:
+        db.delete(txn)
+    db.delete(payment)
+    db.commit()
+    return _loan_response(db, loan)
 
 
 @router.delete("/loans/{loan_id}")
@@ -1448,6 +1603,37 @@ def _mark_paid(row: Recurring) -> None:
     row.next_on = _advance(row.next_on, row.interval)
 
 
+def _txn_day(user: User, txn: Transaction) -> date | None:
+    moment = txn.occurred_at
+    if moment is None:
+        return None
+    if not isinstance(moment, datetime):
+        return moment
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    tz = ZoneInfo((user.timezone or "Asia/Colombo").strip() or "Asia/Colombo")
+    return moment.astimezone(tz).date()
+
+
+def _release_plan(db: Session, user: User, plan: Recurring, txn: Transaction) -> None:
+    """Taking this charge off the plan puts that plan back on the to-pay list."""
+    when = _txn_day(user, txn)
+    others = (
+        db.query(Transaction)
+        .filter(
+            Transaction.user_id == user.id,
+            Transaction.recurring_id == plan.id,
+            Transaction.id != txn.id,
+        )
+        .count()
+    )
+    counted = txn.source == "recurring" or _paid_this_cycle(plan, when)
+    if not counted and others == 0 and ((plan.installments_done or 0) > 0 or not plan.active):
+        counted = True
+    if counted:
+        _unmark_paid(plan)
+
+
 def _paid_this_cycle(row: Recurring, when: date | None) -> bool:
     if when is None or row.next_on is None:
         return False
@@ -1480,7 +1666,7 @@ def _settle_matching_recurring(db: Session, user: User, txn: Transaction) -> boo
         return False
     if not txn.account_id or txn.occurred_at is None:
         return False
-    when = txn.occurred_at.date() if isinstance(txn.occurred_at, datetime) else txn.occurred_at
+    when = _txn_day(user, txn)
     hay = _compact_name(f"{txn.merchant or ''} {txn.raw_sms or ''}")
     paid = Decimal(str(txn.amount))
     best: Recurring | None = None
@@ -1491,7 +1677,7 @@ def _settle_matching_recurring(db: Session, user: User, txn: Transaction) -> boo
             continue
         if row.next_on is None:
             continue
-        if when < row.next_on - timedelta(days=5) or when > row.next_on + timedelta(days=20):
+        if when < row.next_on - timedelta(days=10) or when > row.next_on + timedelta(days=20):
             continue
         keys = _name_keys(row.name) + _name_keys(row.provider)
         if not any(key in hay for key in keys):
@@ -1499,16 +1685,16 @@ def _settle_matching_recurring(db: Session, user: User, txn: Transaction) -> boo
         expected = _expected_lkr(row)
         if expected is None or expected <= 0:
             continue
-        gap = abs(paid - expected)
-        tolerance = max(Decimal("25"), (expected * Decimal("0.03")).quantize(Decimal("0.01")))
-        if gap > tolerance:
+        if not _charge_matches(row, paid, expected):
             continue
+        gap = abs(paid - expected)
         if best is None or best_gap is None or gap < best_gap:
             best = row
             best_gap = gap
     if best is None:
         return False
     txn.recurring_id = best.id
+    _remember_discount(best, txn)
     _mark_paid(best)
     return True
 
@@ -1528,6 +1714,56 @@ def _rewind(day: date, interval: str) -> date:
     return date(year, month, min(day.day, last.day))
 
 
+def _scheduled_and_paid(plan: Recurring, txn: Transaction) -> tuple[Decimal, Decimal] | None:
+    currency = (plan.currency or "LKR").upper()
+    scheduled = Decimal(str(plan.amount))
+    if currency != "LKR" and txn.fx_amount is not None and (txn.currency or "LKR").upper() == currency:
+        return scheduled, Decimal(str(txn.fx_amount))
+    if currency == "LKR":
+        return scheduled, Decimal(str(txn.amount))
+    expected = _expected_lkr(plan)
+    if expected is None:
+        return None
+    return expected, Decimal(str(txn.amount))
+
+
+def _link_amount_allowed(plan: Recurring, txn: Transaction, confirmed_discount: bool) -> bool:
+    """An exact charge can be linked. A lower charge can be linked only when it is confirmed as a discount."""
+    if plan.kind not in {"installment", "subscription"}:
+        return True
+    pair = _scheduled_and_paid(plan, txn)
+    if pair is None:
+        return False
+    scheduled, paid = pair
+    gap = (scheduled - paid).quantize(Decimal("0.01"))
+    if abs(gap) <= Decimal("0.01"):
+        return True
+    return confirmed_discount and gap > 0
+
+
+def _remember_discount(plan: Recurring, txn: Transaction) -> None:
+    pair = _scheduled_and_paid(plan, txn)
+    if pair is None:
+        return
+    scheduled, paid = pair
+    discount = (scheduled - paid).quantize(Decimal("0.01"))
+    if discount <= Decimal("0.01"):
+        return
+    currency = (plan.currency or "LKR").upper()
+    shown = format(discount, "f")
+    label = f"Discount {currency} {shown}" if currency != "LKR" else f"Discount {shown}"
+    note = txn.note or ""
+    if label in note:
+        return
+    txn.note = label if not note else f"{note} · {label}"
+
+
+def _charge_matches(plan: Recurring, paid: Decimal, expected: Decimal) -> bool:
+    if plan.kind in {"installment", "subscription"}:
+        return paid.quantize(Decimal("0.01")) == expected.quantize(Decimal("0.01"))
+    return _amounts_close(paid, expected)
+
+
 def _amounts_close(paid: Decimal, expected: Decimal) -> bool:
     gap = abs(paid - expected)
     tolerance = max(Decimal("25"), (expected * Decimal("0.03")).quantize(Decimal("0.01")))
@@ -1541,7 +1777,7 @@ def _unlinked_payment(db: Session, user: User, row: Recurring) -> Transaction | 
     expected = _expected_lkr(row)
     if expected is None:
         return None
-    start = datetime.combine(row.next_on - timedelta(days=5), datetime.min.time())
+    start = datetime.combine(row.next_on - timedelta(days=10), datetime.min.time())
     end = datetime.combine(row.next_on + timedelta(days=20), datetime.max.time())
     candidates = (
         db.query(Transaction)
@@ -1562,13 +1798,50 @@ def _unlinked_payment(db: Session, user: User, row: Recurring) -> Transaction | 
         if txn.source == "recurring":
             continue
         paid = Decimal(str(txn.amount))
-        if not _amounts_close(paid, expected):
+        if not _charge_matches(row, paid, expected):
+            continue
+        hay = _compact_name(f"{txn.merchant or ''} {txn.raw_sms or ''}")
+        keys = _name_keys(row.name) + _name_keys(row.provider)
+        if keys and not any(key in hay for key in keys):
             continue
         gap = abs(paid - expected)
         if best is None or best_gap is None or gap < best_gap:
             best = txn
             best_gap = gap
     return best
+
+
+def _attach_existing_card_payments(db: Session, user: User) -> None:
+    """A Mint Pay debit already on the card pays the closest installment. It is not charged again."""
+    plans = [
+        row
+        for row in db.query(Recurring).filter_by(user_id=user.id, active=True).all()
+        if row.kind in {"installment", "subscription"} and row.next_on and row.account_id
+    ]
+    pairs: list[tuple[Decimal, Recurring, Transaction]] = []
+    for plan in plans:
+        txn = _unlinked_payment(db, user, plan)
+        if txn is None:
+            continue
+        expected = _expected_lkr(plan)
+        if expected is None:
+            continue
+        pairs.append((abs(Decimal(str(txn.amount)) - expected), plan, txn))
+    pairs.sort(key=lambda item: item[0])
+    taken_plans: set[str] = set()
+    taken_txns: set[str] = set()
+    changed = False
+    for _gap, plan, txn in pairs:
+        if plan.id in taken_plans or txn.id in taken_txns or txn.recurring_id:
+            continue
+        txn.recurring_id = plan.id
+        _remember_discount(plan, txn)
+        _mark_paid(plan)
+        taken_plans.add(plan.id)
+        taken_txns.add(txn.id)
+        changed = True
+    if changed:
+        db.commit()
 
 
 def _advance(day: date, interval: str) -> date:
@@ -1626,7 +1899,26 @@ def _lkr_rate(currency: str) -> Decimal:
     return _fx_rates[code]
 
 
-def _recurring_json(row: Recurring, accounts: dict[str, Account]) -> dict:
+def _payments_by_plan(db: Session, user_id: str) -> dict[str, list[Transaction]]:
+    grouped: dict[str, list[Transaction]] = {}
+    rows = (
+        db.query(Transaction)
+        .filter(Transaction.user_id == user_id, Transaction.recurring_id.isnot(None))
+        .order_by(Transaction.occurred_at.desc(), Transaction.created_at.desc())
+        .all()
+    )
+    for txn in rows:
+        if txn.recurring_id:
+            grouped.setdefault(txn.recurring_id, []).append(txn)
+    return grouped
+
+
+def _recurring_json(
+    row: Recurring,
+    accounts: dict[str, Account],
+    payments: list[Transaction] | None = None,
+    categories: dict[str, Category] | None = None,
+) -> dict:
     account = accounts.get(row.account_id or "")
     return {
         "id": row.id,
@@ -1643,7 +1935,15 @@ def _recurring_json(row: Recurring, accounts: dict[str, Account]) -> dict:
         "installments_done": row.installments_done or 0,
         "active": row.active,
         "note": row.note or "",
+        "payments": [txn_json(txn, accounts, categories or {}) for txn in (payments or [])],
     }
+
+
+def _recurring_out(db: Session, user: User, row: Recurring) -> dict:
+    accounts = account_map(db, user.id)
+    categories = category_map(db, user.id)
+    payments = _payments_by_plan(db, user.id).get(row.id, [])
+    return _recurring_json(row, accounts, payments, categories)
 
 
 class RecurringIn(BaseModel):
@@ -1696,9 +1996,12 @@ class RecurringIn(BaseModel):
 
 @router.get("/recurring")
 def list_recurring(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    _attach_existing_card_payments(db, user)
     rows = db.query(Recurring).filter_by(user_id=user.id).order_by(Recurring.next_on, Recurring.created_at).all()
     accounts = account_map(db, user.id)
-    return [_recurring_json(row, accounts) for row in rows]
+    categories = category_map(db, user.id)
+    linked = _payments_by_plan(db, user.id)
+    return [_recurring_json(row, accounts, linked.get(row.id, []), categories) for row in rows]
 
 
 @router.post("/recurring")
@@ -1722,11 +2025,20 @@ def create_recurring(body: RecurringIn, user: User = Depends(current_user), db: 
     db.add(row)
     db.commit()
     db.refresh(row)
-    return _recurring_json(row, account_map(db, user.id))
+    return _recurring_out(db, user, row)
+
+
+class RecurringPayIn(BaseModel):
+    amount: Decimal | None = Field(default=None, gt=0)
 
 
 @router.post("/recurring/{recurring_id}/pay")
-def pay_recurring(recurring_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def pay_recurring(
+    recurring_id: str,
+    body: RecurringPayIn | None = None,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
     row = db.get(Recurring, recurring_id)
     if row is None or row.user_id != user.id:
         raise HTTPException(404, "Recurring item not found")
@@ -1735,21 +2047,29 @@ def pay_recurring(recurring_id: str, user: User = Depends(current_user), db: Ses
     if not row.account_id:
         raise HTTPException(400, "Choose an account")
     account = _owned_account(db, user, row.account_id)
-    existing = _unlinked_payment(db, user, row)
-    if existing is not None:
-        existing.recurring_id = row.id
-        _mark_paid(row)
-        db.commit()
-        db.refresh(row)
-        return _recurring_json(row, account_map(db, user.id))
+    scheduled = Decimal(str(row.amount))
+    face = scheduled if body is None or body.amount is None else Decimal(str(body.amount))
+    full_price = abs(face - scheduled) <= Decimal("0.01")
+    if full_price:
+        existing = _unlinked_payment(db, user, row)
+        if existing is not None:
+            existing.recurring_id = row.id
+            _mark_paid(row)
+            db.commit()
+            db.refresh(row)
+            return _recurring_out(db, user, row)
     currency = (row.currency or "LKR").upper()
-    face = Decimal(str(row.amount))
     settled, fx_amount, currency = lkr_settlement(face, currency)
     note = "" if (row.note or "").startswith("fx:") else (row.note or "")
     if currency != "LKR":
         shown = format(face.quantize(Decimal("0.01")), "f")
         original = f"{currency} {shown}"
         note = original if not note else f"{note} · {original}"
+    discount = (scheduled - face).quantize(Decimal("0.01"))
+    if discount > 0:
+        shown_discount = format(discount, "f")
+        label = f"Discount {currency} {shown_discount}" if currency != "LKR" else f"Discount {shown_discount}"
+        note = label if not note else f"{note} · {label}"
     txn = Transaction(
         user_id=user.id,
         account_id=account.id,
@@ -1769,7 +2089,7 @@ def pay_recurring(recurring_id: str, user: User = Depends(current_user), db: Ses
     _mark_paid(row)
     db.commit()
     db.refresh(row)
-    return _recurring_json(row, account_map(db, user.id))
+    return _recurring_out(db, user, row)
 
 
 class RecurringPatch(BaseModel):
@@ -1853,7 +2173,7 @@ def patch_recurring(
         row.active = False
     db.commit()
     db.refresh(row)
-    return _recurring_json(row, account_map(db, user.id))
+    return _recurring_out(db, user, row)
 
 
 @router.delete("/recurring/{recurring_id}")

@@ -6,7 +6,7 @@ verb, and optional account digits. It does not call any bank.
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 AMOUNT_RE = re.compile(
@@ -56,7 +56,10 @@ MONTHS = {
 
 CATEGORY_RULES = [
     (re.compile(r"(?i)uber|pickme|kangaroo|petrol|diesel|ceypetco|\bioc\b|fuel|filling station"), "Transport"),
-    (re.compile(r"(?i)\b(dialog|mobitel|hutch|airtel|slt|lanka bell|leco|ceb|peo\s*tv)\b"), "Utilities"),
+    (re.compile(r"(?i)peo\s*tv|broadband|fibre|fiber"), "Internet"),
+    (re.compile(r"(?i)\b(leco|ceb|electricity)\b"), "Electricity"),
+    (re.compile(r"(?i)\b(nwsdb|water\s*board|water\s*bill)\b"), "Water"),
+    (re.compile(r"(?i)\b(dialog|mobitel|hutch|airtel|slt|lanka bell)\b"), "Phone"),
     (
         re.compile(
             r"(?i)keells|cargills|arpico|glomark|\bspar\b|supermarket|food\s*city|laughfs|"
@@ -81,6 +84,194 @@ CATEGORY_RULES = [
     (re.compile(r"(?i)school|university|tuition|college"), "Education"),
     (re.compile(r"(?i)\b(fund transfer|online transfer|ceft|slip transfer)\b"), "Transfers"),
 ]
+
+
+@dataclass
+class UtilityNotice:
+    kind: str
+    provider: str = ""
+    account_no: str = ""
+    holder: str = ""
+    outstanding: Decimal | None = None
+    due_on: date | None = None
+    total_due: Decimal | None = None
+    monthly: Decimal | None = None
+
+
+def parse_utility(text: str) -> UtilityNotice | None:
+    """A bill states what is owed. A notice or a payment receipt is not a bank movement."""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+    water = "nwsdb" in lowered or "water supply" in lowered or "waterboard" in lowered or "water charge" in lowered
+    phone = _phone_provider(raw)
+    if re.search(r"(?i)received your payment", raw) and (water or "payment of" in lowered):
+        return UtilityNotice(kind="payment", provider="Water" if water else "Utility", account_no=_utility_account(raw))
+    has_bill = "total due" in lowered or "outstanding" in lowered
+    if re.search(r"(?i)notice of disconnection|supply will be disconnected", raw) and not has_bill:
+        return UtilityNotice(kind="notice", provider="Water", account_no=_utility_account(raw))
+    if water and re.search(r"(?i)interrupt|suspended|maintenance|cashier|restored|postponed", raw) and not has_bill:
+        return UtilityNotice(kind="notice", provider="Water", account_no=_utility_account(raw))
+    outstanding, due_on = _outstanding(raw)
+    total_due = _labeled_amount(raw, "Total Due")
+    monthly = _labeled_amount(raw, "Monthly Charges") or _labeled_amount(raw, "Monthly Bill")
+    electricity = (
+        "ebill.edl.lk" in lowered
+        or "monthly bill" in lowered
+        or bool(re.search(r"(?i)\b(ceb|leco)\b", raw))
+        or ("total due" in lowered and not water and not phone)
+        or ("outstanding" in lowered and not water and not phone)
+    )
+    if phone and re.search(r"(?i)\b(bill|invoice)\b", raw) and not water and not electricity:
+        amount = (
+            _labeled_amount(raw, "Total Due")
+            or _labeled_amount(raw, "Amount Due")
+            or _labeled_amount(raw, "Amount Payable")
+            or _first_rs_amount(raw)
+        )
+        if amount is not None:
+            return UtilityNotice(
+                kind="bill",
+                provider=phone,
+                account_no=_phone_account(raw),
+                holder=_holder_name(raw),
+                outstanding=amount,
+                due_on=_loose_due(raw),
+                total_due=amount,
+                monthly=monthly,
+            )
+    if outstanding is None and total_due is None and monthly is None:
+        return None
+    if not electricity and not water:
+        return None
+    if water and due_on is None:
+        due_on = _water_due(raw)
+    return UtilityNotice(
+        kind="bill",
+        provider="Water" if water else "Electricity",
+        account_no=_utility_account(raw),
+        holder=_holder_name(raw),
+        outstanding=outstanding if outstanding is not None else total_due,
+        due_on=due_on,
+        total_due=total_due,
+        monthly=monthly,
+    )
+
+
+def _phone_provider(text: str) -> str:
+    if re.search(r"(?i)\bhutch\b", text):
+        return "Hutch"
+    if re.search(r"(?i)\bdialog\b", text):
+        return "Dialog"
+    if re.search(r"(?i)\bairtel\b", text):
+        return "Airtel"
+    if re.search(r"(?i)slt\s*mobitel|\bslt\b", text):
+        return "SLT"
+    if re.search(r"(?i)\bmobitel\b", text):
+        return "Mobitel"
+    return ""
+
+
+def _phone_account(text: str) -> str:
+    named = _utility_account(text)
+    if named:
+        return named
+    match = re.search(r"(?i)bill for\s*(\d{9,12})", text)
+    if match:
+        return match.group(1)
+    match = re.search(r"\b(0\d{9})\b", text)
+    return match.group(1) if match else ""
+
+
+def _loose_due(text: str) -> date | None:
+    match = re.search(
+        r"(?i)(?:due(?:\s+date)?|pay before|before)\s*:?\s*(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})",
+        text,
+    )
+    if not match:
+        return None
+    day, month, year = (int(match.group(part)) for part in (1, 2, 3))
+    if year < 100:
+        year += 2000
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _first_rs_amount(text: str) -> Decimal | None:
+    match = AMOUNT_RE.search(text)
+    if not match:
+        return None
+    return _decimal(match.group(1))
+
+
+def _utility_account(text: str) -> str:
+    matches = list(
+        re.finditer(
+            r"(?i)(?:a/?c(?:count)?\s*(?:no|number)?|account\s+number)\s*[:.]?\s*([0-9][0-9/]{3,40})",
+            text,
+        )
+    )
+    if not matches:
+        return ""
+    return matches[-1].group(1).rstrip(".,")
+
+
+def _holder_name(text: str) -> str:
+    found = ""
+    for line in text.splitlines():
+        line = line.strip().rstrip(".").strip()
+        if re.fullmatch(r"[A-Z][A-Z .]{2,40}", line) and " " in line:
+            found = line
+    return found
+
+
+def _water_due(text: str) -> date | None:
+    periods = list(re.finditer(r"(?i)period\s*:\s*\d{1,2}-\d{1,2}-\d{4}\s+to\s+(\d{1,2})-(\d{1,2})-(20\d{2})", text))
+    windows = list(re.finditer(r"(?i)settle within\s+(\d+)\s+days", text))
+    if not periods or not windows:
+        return None
+    day, month, year = (int(periods[-1].group(part)) for part in (1, 2, 3))
+    try:
+        return date(year, month, day) + timedelta(days=int(windows[-1].group(1)))
+    except ValueError:
+        return None
+
+
+def _money_pattern() -> str:
+    return r"(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
+
+
+def _labeled_amount(text: str, label: str) -> Decimal | None:
+    matches = list(
+        re.finditer(
+            rf"(?i){label}\s*:\s*Rs\.?\s*{_money_pattern()}",
+            text,
+        )
+    )
+    if not matches:
+        return None
+    return _decimal(matches[-1].group(1))
+
+
+def _outstanding(text: str) -> tuple[Decimal | None, date | None]:
+    match = re.search(
+        rf"(?i)outstanding\s*:\s*Rs\.?\s*{_money_pattern()}"
+        r"(?:\s*by\s*(20\d{2}-\d{2}-\d{2}))?",
+        text,
+    )
+    if not match:
+        return None, None
+    due = None
+    if match.group(2):
+        year, month, day = (int(part) for part in match.group(2).split("-"))
+        try:
+            due = date(year, month, day)
+        except ValueError:
+            due = None
+    return _decimal(match.group(1)), due
 
 
 @dataclass
@@ -122,6 +313,9 @@ def parse_sms(text: str, received_at: datetime | None = None) -> ParsedSms:
         return ParsedSms(False, reason="otp")
     if DECLINED_RE.search(raw):
         return ParsedSms(False, reason="declined")
+    utility = parse_utility(raw)
+    if utility is not None:
+        return ParsedSms(False, reason=f"utility_{utility.kind}")
 
     amounts = [(m.start(), _decimal(m.group(1)), m.group(0)) for m in AMOUNT_RE.finditer(raw)]
     balance_at = BALANCE_RE.search(raw)

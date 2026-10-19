@@ -9,10 +9,13 @@ import kotlin.concurrent.thread
 object FolioIngest {
     private val money = Regex("(?i)(\\brs\\.?\\s*\\d|\\blkr\\s*\\d)")
     private val verb = Regex("(?i)\\b(debited|debit|credited|credit|withdrawn|withdrawal|deposited|deposit|purchase|purchased|spent)\\b")
+    private val bill = Regex("(?i)(total due|amount due|outstanding|monthly bill|monthly charges|nwsdb|waterboard|hutch bill|slt invoice|dialog bill|mobitel bill)")
     private val otp = Regex("(?i)\\b(otp|one[- ]time password|verification code)\\b")
 
     fun looksFinancial(text: String): Boolean {
-        return money.containsMatchIn(text) && verb.containsMatchIn(text) && !otp.containsMatchIn(text)
+        if (otp.containsMatchIn(text)) return false
+        if (bill.containsMatchIn(text) && money.containsMatchIn(text)) return true
+        return money.containsMatchIn(text) && verb.containsMatchIn(text)
     }
 
     fun post(context: Context, body: String, sender: String) {

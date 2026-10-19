@@ -45,6 +45,70 @@ def test_register_seeds_categories_and_rejects_duplicate(client):
     assert again.status_code == 400
 
 
+def test_an_electricity_bill_is_saved_without_a_transaction(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    text = (
+        "A/C No: 8021065206 (D1)\nM.F.R. MOHAMED.\n"
+        "Outstanding: Rs. 12,438.26 by 2026-10-04\n"
+        "Monthly Bill: Rs. 5,837.95\nTotal Due: Rs. 18,276.21\n"
+        "https://ebill.edl.lk/v1/example"
+    )
+    saved = client.post("/sms/ingest", headers=headers, json={"body": text, "manual": True})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["status"] == "bill"
+    assert saved.json()["bill"]["outstanding"] == 12438.26
+    assert saved.json()["bill"]["due_on"] == "2026-10-04"
+    assert saved.json()["bill"]["total_due"] == 18276.21
+    assert saved.json()["transaction"] is None
+    assert client.get("/transactions", headers=headers).json() == []
+    again = client.post(
+        "/sms/ingest",
+        headers=headers,
+        json={"body": text.replace("12,438.26", "10,000.00").replace("2026-10-04", "2026-11-04"), "manual": True},
+    )
+    assert again.status_code == 200, again.text
+    rows = client.get("/bills", headers=headers).json()
+    assert len(rows) == 1
+    assert rows[0]["outstanding"] == 10000
+    assert rows[0]["due_on"] == "2026-11-04"
+
+
+def test_an_nwsdb_bill_is_saved_and_an_older_bill_does_not_replace_it(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    latest = (
+        "A/C No : 42/12/138/027/11 (10)\nMR. M.J.M. FLYIL\n"
+        "Period : 01-09-2026 to 01-10-2026\n"
+        "Monthly Charges : Rs. 3204.93\nTotal Due : Rs. 9101.25\n"
+        "pl. settle within 14 days to earn rebate,\nNWSDB"
+    )
+    saved = client.post("/sms/ingest", headers=headers, json={"body": latest, "manual": True})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["status"] == "bill"
+    assert saved.json()["bill"]["provider"] == "Water"
+    assert saved.json()["bill"]["outstanding"] == 9101.25
+    assert saved.json()["bill"]["due_on"] == "2026-10-15"
+    assert saved.json()["transaction"] is None
+    older = latest.replace("01-10-2026", "01-09-2026").replace("9101.25", "5896.32").replace("3204.93", "3254.83")
+    again = client.post("/sms/ingest", headers=headers, json={"body": older, "manual": True})
+    assert again.status_code == 200, again.text
+    rows = client.get("/bills", headers=headers).json()
+    assert len(rows) == 1
+    assert rows[0]["outstanding"] == 9101.25
+    assert rows[0]["due_on"] == "2026-10-15"
+    assert client.get("/transactions", headers=headers).json() == []
+    notice = client.post(
+        "/sms/ingest",
+        headers=headers,
+        json={
+            "body": "Please Settle Rs : 5896.32 Within 2 Days. Otherwise supply will be disconnected.",
+            "manual": True,
+        },
+    )
+    assert notice.json()["status"] == "ignored"
+
+
 def test_sms_updates_balance_and_dedupes(client):
     token = auth(client)
     headers = {"Authorization": f"Bearer {token}"}
@@ -136,6 +200,119 @@ def test_editing_a_loan_keeps_payments_and_moves_the_balance(client):
     assert balances["Saving"] == 2000 - 1000 + 300
 
 
+def test_editing_a_loan_payment_moves_it_to_another_account(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    personal = client.post(
+        "/accounts",
+        headers=headers,
+        json={"name": "Personal", "type": "bank", "purpose": "personal", "opening_balance": 5000},
+    ).json()
+    saving = client.post(
+        "/accounts",
+        headers=headers,
+        json={"name": "Saving", "type": "bank", "purpose": "personal", "opening_balance": 2000},
+    ).json()
+    lent = client.post(
+        "/loans",
+        headers=headers,
+        json={
+            "kind": "lend",
+            "party_kind": "person",
+            "party_name": "Brother",
+            "account_id": personal["id"],
+            "amount": 3900,
+        },
+    ).json()
+    paid = client.post(
+        f"/loans/{lent['id']}/payments",
+        headers=headers,
+        json={"amount": 900, "account_id": personal["id"]},
+    )
+    assert paid.status_code == 200, paid.text
+    payment = paid.json()["payments"][0]
+    assert payment["account_name"] == "Personal"
+    edited = client.patch(
+        f"/loans/{lent['id']}/payments/{payment['id']}",
+        headers=headers,
+        json={"amount": 500, "account_id": saving["id"]},
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["remaining"] == 3400
+    assert edited.json()["payments"][0]["amount"] == 500
+    assert edited.json()["payments"][0]["account_name"] == "Saving"
+    too_much = client.patch(
+        f"/loans/{lent['id']}/payments/{payment['id']}",
+        headers=headers,
+        json={"amount": 4000, "account_id": saving["id"]},
+    )
+    assert too_much.status_code == 400
+    balances = {row["name"]: row["balance"] for row in client.get("/accounts", headers=headers).json()}
+    assert balances["Personal"] == 5000 - 3900
+    assert balances["Saving"] == 2000 + 500
+
+
+def test_a_loan_payment_without_an_account_shows_on_the_timeline_and_can_be_deleted(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    lent = client.post(
+        "/loans",
+        headers=headers,
+        json={"kind": "lend", "party_kind": "person", "party_name": "Brother", "amount": 3900},
+    ).json()
+    paid = client.post(f"/loans/{lent['id']}/payments", headers=headers, json={"amount": 900})
+    assert paid.status_code == 200, paid.text
+    payment_id = paid.json()["payments"][0]["id"]
+
+    def merchants():
+        timeline = client.get("/timeline?month=2026-10", headers=headers).json()
+        return [item["merchant"] for day in timeline["days"] for item in day["items"]]
+
+    assert "Repayment from Brother" in merchants()
+    removed = client.delete(f"/loans/{lent['id']}/payments/{payment_id}", headers=headers)
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["remaining"] == 3900
+    assert removed.json()["payments"] == []
+    assert "Repayment from Brother" not in merchants()
+
+
+def test_deleting_a_repayment_from_the_timeline_keeps_the_loan(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    cash = client.post(
+        "/accounts",
+        headers=headers,
+        json={"name": "Cash", "type": "cash", "opening_balance": 20000},
+    ).json()
+    borrowed = client.post(
+        "/loans",
+        headers=headers,
+        json={
+            "kind": "borrow",
+            "party_kind": "person",
+            "party_name": "Brother",
+            "account_id": cash["id"],
+            "amount": 5000,
+        },
+    ).json()
+    paid = client.post(f"/loans/{borrowed['id']}/payments", headers=headers, json={"amount": 5000})
+    assert paid.status_code == 200, paid.text
+    timeline = client.get("/timeline?month=2026-10", headers=headers).json()
+    items = [item for day in timeline["days"] for item in day["items"]]
+    repayment = next(item for item in items if item["merchant"] == "Repayment to Brother")
+    opening = next(item for item in items if item["merchant"] == "Borrowed from Brother")
+    removed = client.delete(f"/transactions/{repayment['id']}", headers=headers)
+    assert removed.status_code == 200, removed.text
+    loans = client.get("/loans", headers=headers).json()
+    loan = next(row for row in loans if row["id"] == borrowed["id"])
+    assert loan["remaining"] == 5000
+    assert loan["payments"] == []
+    blocked = client.delete(f"/transactions/{opening['id']}", headers=headers)
+    assert blocked.status_code == 400
+    still = client.get("/loans", headers=headers).json()
+    assert any(row["id"] == borrowed["id"] for row in still)
+
+
 def test_business_account_and_unmatched_sms(client):
     token = auth(client)
     headers = {"Authorization": f"Bearer {token}"}
@@ -162,7 +339,7 @@ def test_business_account_and_unmatched_sms(client):
     )
     assert posted.json()["status"] == "posted"
     assert posted.json()["transaction"]["scope"] == "business"
-    assert posted.json()["transaction"]["category_name"] == "Utilities"
+    assert posted.json()["transaction"]["category_name"] == "Phone"
     review = client.post(
         "/sms/ingest",
         headers=headers,
@@ -343,6 +520,57 @@ def test_transfer_is_excluded_from_all_account_income(client):
     balances = {row["name"]: row["balance"] for row in client.get("/accounts", headers=headers).json()}
     assert balances["Primary"] == 750
     assert balances["Savings"] == 700
+
+
+def test_each_timeline_day_shows_the_balance_left(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    cash = client.post(
+        "/accounts",
+        headers=headers,
+        json={"name": "Cash", "type": "cash", "opening_balance": 1000},
+    ).json()
+    client.post(
+        "/transactions",
+        headers=headers,
+        json={
+            "account_id": cash["id"],
+            "direction": "expense",
+            "amount": 100,
+            "merchant": "Tea",
+            "occurred_at": "2026-10-10T04:00:00",
+        },
+    )
+    client.post(
+        "/transactions",
+        headers=headers,
+        json={
+            "account_id": cash["id"],
+            "direction": "income",
+            "amount": 40,
+            "merchant": "Refund",
+            "occurred_at": "2026-10-11T04:00:00",
+        },
+    )
+    client.post(
+        "/transactions",
+        headers=headers,
+        json={
+            "account_id": cash["id"],
+            "direction": "expense",
+            "amount": 15,
+            "merchant": "Bus",
+            "occurred_at": "2026-10-11T08:00:00",
+        },
+    )
+    timeline = client.get("/timeline?month=2026-10", headers=headers).json()
+    balances = {day["date"]: day["balance"] for day in timeline["days"]}
+    assert balances["2026-10-10"] == 900
+    assert balances["2026-10-11"] == 925
+    later = next(day for day in timeline["days"] if day["date"] == "2026-10-11")
+    assert [(item["merchant"], item["balance"]) for item in later["items"]] == [("Bus", 925), ("Refund", 940)]
+    earlier = next(day for day in timeline["days"] if day["date"] == "2026-10-10")
+    assert earlier["items"][0]["balance"] == 900
 
 
 def test_loans_between_people_and_own_accounts(client):
@@ -739,8 +967,48 @@ def test_recording_the_last_installment_removes_it_and_updates_the_account(clien
     paid = client.post(f"/recurring/{plan['id']}/pay", headers=headers)
     assert paid.status_code == 200, paid.text
     assert paid.json()["active"] is False
+    assert len(paid.json()["payments"]) == 1
     balances = {row["name"]: row["balance"] for row in client.get("/accounts", headers=headers).json()}
     assert balances["Cash"] == 4000
+    payment = client.get("/recurring", headers=headers).json()[0]["payments"][0]
+    assert payment["merchant"] == "Carnage"
+    assert payment["amount"] == 1000
+    removed = client.delete(f"/transactions/{payment['id']}", headers=headers)
+    assert removed.status_code == 200, removed.text
+    opened = client.get("/recurring", headers=headers).json()[0]
+    assert opened["active"] is True
+    assert opened["installments_done"] == 0
+    assert opened["payments"] == []
+
+
+def test_a_discounted_payment_is_what_leaves_the_account(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    cash = client.post("/accounts", headers=headers, json={"name": "Cash", "type": "cash", "opening_balance": 5000}).json()
+    plan = client.post(
+        "/recurring",
+        headers=headers,
+        json={
+            "kind": "installment",
+            "name": "Carnage",
+            "provider": "Mint Pay",
+            "amount": 1000,
+            "account_id": cash["id"],
+            "interval": "monthly",
+            "next_on": "2026-10-13",
+            "installments_total": 2,
+        },
+    ).json()
+    paid = client.post(f"/recurring/{plan['id']}/pay", headers=headers, json={"amount": 800})
+    assert paid.status_code == 200, paid.text
+    assert paid.json()["amount"] == 1000
+    assert paid.json()["installments_done"] == 1
+    assert paid.json()["active"] is True
+    txn = client.get("/transactions", headers=headers).json()[0]
+    assert txn["amount"] == 800
+    assert txn["note"] == "Discount 200.00"
+    balances = {row["name"]: row["balance"] for row in client.get("/accounts", headers=headers).json()}
+    assert balances["Cash"] == 4200
 
 
 def test_a_manual_expense_settles_the_matching_installment_without_a_second_debit(client):
@@ -865,10 +1133,15 @@ def test_category_budget_includes_subcategories(client):
     assert next(row for row in rows if row["name"] == "Toys")["parent_id"] == kids["id"]
     day_out = next(row for row in rows if row["name"] == "Day out")
     assert next(row for row in rows if row["name"] == "Breakfast")["parent_id"] == day_out["id"]
+    shopping = next(row for row in rows if row["name"] == "Shopping" and row.get("scope") != "business")
+    assert shopping["parent_id"] is None
+    assert next(row for row in rows if row["name"] == "Dress")["parent_id"] == shopping["id"]
+    assert next(row for row in rows if row["name"] == "Electronics")["parent_id"] == shopping["id"]
+    assert next(row for row in rows if row["name"] == "Shoes")["parent_id"] == shopping["id"]
     membership = next(row for row in rows if row["name"] == "Membership" and row.get("scope") != "business")
     assert next(row for row in rows if row["name"] == "Gym" and row.get("scope") != "business")["parent_id"] == membership["id"]
     assert not any(
-        row["name"] in {"Dining out", "Rice and staples", "School items", "Shopping", "Outing", "Charity", "Health care", "iCloud+", "Spotify", "Cursor"}
+        row["name"] in {"Dining out", "Rice and staples", "School items", "Outing", "Charity", "Health care", "iCloud+", "Spotify", "Cursor"}
         for row in rows
         if row["kind"] == "expense" and row.get("scope") != "business"
     )
@@ -993,13 +1266,37 @@ def test_personal_categories_outside_the_household_list_are_removed(client):
     db.close()
     rows = client.get("/categories", headers=headers).json()
     personal = {row["name"] for row in rows if row["kind"] == "expense" and row.get("scope") != "business"}
-    assert "Life & Entertainment" not in personal
+    assert "Life & Entertainment" in personal
     assert "Health care" not in personal
     assert "Personal care" not in personal
     assert "Groceries" in personal
     doctor = next(row for row in rows if row["name"] == "Doctor")
     health = next(row for row in rows if row["name"] == "Health" and row.get("scope") != "business")
     assert doctor["parent_id"] == health["id"]
+
+
+def test_a_category_and_subcategory_the_user_adds_stay(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    parent = client.post(
+        "/categories",
+        headers=headers,
+        json={"name": "Stationery", "kind": "expense", "scope": "personal"},
+    )
+    assert parent.status_code == 200, parent.text
+    child = client.post(
+        "/categories",
+        headers=headers,
+        json={"name": "Pens", "kind": "expense", "scope": "personal", "parent_id": parent.json()["id"]},
+    )
+    assert child.status_code == 200, child.text
+    rows = client.get("/categories", headers=headers).json()
+    saved_parent = next(row for row in rows if row["name"] == "Stationery")
+    saved_child = next(row for row in rows if row["name"] == "Pens")
+    assert saved_parent["parent_id"] is None
+    assert saved_child["parent_id"] == saved_parent["id"]
+    shopping = next(row for row in rows if row["name"] == "Shopping" and row.get("scope") != "business")
+    assert next(row for row in rows if row["name"] == "Dress")["parent_id"] == shopping["id"]
 
 
 def test_category_rename_subcategory_and_delete_stick(client):
@@ -1190,6 +1487,236 @@ def test_an_apple_text_settles_icloud_and_deleting_it_brings_the_due_date_back(c
     assert restored[0]["next_on"] == "2026-10-04"
 
 
+def test_a_different_amount_cannot_be_linked_to_an_installment(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    cash = client.post("/accounts", headers=headers, json={"name": "Cash", "type": "cash", "opening_balance": 5000}).json()
+    plan = client.post(
+        "/recurring",
+        headers=headers,
+        json={
+            "kind": "installment",
+            "name": "Carnage",
+            "provider": "Mint Pay",
+            "amount": 1000,
+            "account_id": cash["id"],
+            "interval": "monthly",
+            "next_on": "2026-10-11",
+            "installments_total": 2,
+        },
+    ).json()
+    short = client.post(
+        "/transactions",
+        headers=headers,
+        json={
+            "account_id": cash["id"],
+            "direction": "expense",
+            "amount": 800,
+            "merchant": "Carnage",
+            "occurred_at": "2026-10-11T04:00:00",
+        },
+    ).json()
+    rejected = client.post(
+        f"/transactions/{short['id']}/recurring",
+        headers=headers,
+        json={"recurring_id": plan["id"]},
+    )
+    assert rejected.status_code == 400
+    assert "amount" in rejected.json()["detail"].lower()
+    assert client.get("/recurring", headers=headers).json()[0]["installments_done"] == 0
+    exact = client.post(
+        "/transactions",
+        headers=headers,
+        json={
+            "account_id": cash["id"],
+            "direction": "expense",
+            "amount": 1000,
+            "merchant": "Carnage",
+            "occurred_at": "2026-10-11T05:00:00",
+        },
+    ).json()
+    linked = client.post(
+        f"/transactions/{exact['id']}/recurring",
+        headers=headers,
+        json={"recurring_id": plan["id"]},
+    )
+    assert linked.status_code == 200, linked.text
+    assert client.get("/recurring", headers=headers).json()[0]["installments_done"] == 1
+
+
+def test_mint_pay_charges_a_little_under_the_installments_count_as_paid(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    cash = client.post("/accounts", headers=headers, json={"name": "Cash", "type": "cash", "opening_balance": 20000}).json()
+    client.post(
+        "/transactions",
+        headers=headers,
+        json={
+            "account_id": cash["id"],
+            "direction": "expense",
+            "amount": 2743.68,
+            "merchant": "MINTPAY Colombo 06",
+            "occurred_at": "2026-10-11T04:30:00",
+        },
+    )
+    client.post(
+        "/transactions",
+        headers=headers,
+        json={
+            "account_id": cash["id"],
+            "direction": "expense",
+            "amount": 1061.46,
+            "merchant": "MINTPAY Colombo 06",
+            "occurred_at": "2026-10-07T11:00:00",
+        },
+    )
+    client.post(
+        "/transactions",
+        headers=headers,
+        json={
+            "account_id": cash["id"],
+            "direction": "expense",
+            "amount": 500,
+            "merchant": "MINTPAY Colombo 06",
+            "occurred_at": "2026-10-11T05:00:00",
+        },
+    )
+    for amount, due in ((2746.33, "2026-10-11"), (1077.71, "2026-10-13")):
+        created = client.post(
+            "/recurring",
+            headers=headers,
+            json={
+                "kind": "installment",
+                "name": "Carnage",
+                "provider": "Mint Pay",
+                "amount": amount,
+                "account_id": cash["id"],
+                "interval": "monthly",
+                "next_on": due,
+                "installments_total": 1,
+            },
+        )
+        assert created.status_code == 200, created.text
+    rows = client.get("/recurring", headers=headers).json()
+    done = {row["amount"]: row["installments_done"] for row in rows}
+    assert done[2746.33] == 0
+    assert done[1077.71] == 0
+    charges = {row["amount"]: row for row in client.get("/transactions", headers=headers).json()}
+    for amount, plan_amount in ((2743.68, 2746.33), (1061.46, 1077.71)):
+        plan = next(row for row in rows if row["amount"] == plan_amount)
+        refused = client.post(
+            f"/transactions/{charges[amount]['id']}/recurring",
+            headers=headers,
+            json={"recurring_id": plan["id"]},
+        )
+        assert refused.status_code == 400
+        linked = client.post(
+            f"/transactions/{charges[amount]['id']}/recurring",
+            headers=headers,
+            json={"recurring_id": plan["id"], "discount": True},
+        )
+        assert linked.status_code == 200, linked.text
+        assert linked.json()["amount"] == amount
+    notes = {row["amount"]: row["note"] for row in client.get("/transactions", headers=headers).json()}
+    assert notes[2743.68] == "Discount 2.65"
+    assert notes[1061.46] == "Discount 16.25"
+    assert notes[500] == ""
+    done = {row["amount"]: row["installments_done"] for row in client.get("/recurring", headers=headers).json()}
+    assert done[2746.33] == 1
+    assert done[1077.71] == 1
+
+
+def test_a_lower_amount_links_only_when_the_discount_is_confirmed(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    cash = client.post("/accounts", headers=headers, json={"name": "Cash", "type": "cash", "opening_balance": 20000}).json()
+    plan = client.post(
+        "/recurring",
+        headers=headers,
+        json={
+            "kind": "installment",
+            "name": "Carnage",
+            "amount": 2746.33,
+            "account_id": cash["id"],
+            "interval": "monthly",
+            "next_on": "2026-10-11",
+            "installments_total": 2,
+        },
+    ).json()
+    short = client.post(
+        "/transactions",
+        headers=headers,
+        json={
+            "account_id": cash["id"],
+            "direction": "expense",
+            "amount": 2743.68,
+            "merchant": "Card charge",
+            "occurred_at": "2026-10-11T04:30:00",
+        },
+    ).json()
+    rejected = client.post(
+        f"/transactions/{short['id']}/recurring",
+        headers=headers,
+        json={"recurring_id": plan["id"]},
+    )
+    assert rejected.status_code == 400
+    assert client.get("/recurring", headers=headers).json()[0]["installments_done"] == 0
+    linked = client.post(
+        f"/transactions/{short['id']}/recurring",
+        headers=headers,
+        json={"recurring_id": plan["id"], "discount": True},
+    )
+    assert linked.status_code == 200, linked.text
+    assert linked.json()["amount"] == 2743.68
+    assert linked.json()["note"] == "Discount 2.65"
+    assert client.get("/recurring", headers=headers).json()[0]["installments_done"] == 1
+    higher = client.post(
+        "/transactions",
+        headers=headers,
+        json={
+            "account_id": cash["id"],
+            "direction": "expense",
+            "amount": 2800,
+            "merchant": "Card charge",
+            "occurred_at": "2026-10-11T06:00:00",
+        },
+    ).json()
+    refused = client.post(
+        f"/transactions/{higher['id']}/recurring",
+        headers=headers,
+        json={"recurring_id": plan["id"], "discount": True},
+    )
+    assert refused.status_code == 400
+
+
+def test_unlinking_still_restores_a_subscription_after_its_due_date_moved(client):
+    token = auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    cash = client.post("/accounts", headers=headers, json={"name": "Cash", "type": "cash", "opening_balance": 5000}).json()
+    plan = client.post(
+        "/recurring",
+        headers=headers,
+        json={
+            "kind": "subscription",
+            "name": "Netflix",
+            "amount": 1000,
+            "account_id": cash["id"],
+            "interval": "monthly",
+            "next_on": "2026-10-04",
+        },
+    ).json()
+    paid = client.post(f"/recurring/{plan['id']}/pay", headers=headers)
+    assert paid.status_code == 200, paid.text
+    moved = client.patch(f"/recurring/{plan['id']}", headers=headers, json={"next_on": "2027-06-04"})
+    assert moved.status_code == 200, moved.text
+    txn = client.get("/transactions", headers=headers).json()[0]
+    cleared = client.post(f"/transactions/{txn['id']}/recurring", headers=headers, json={"recurring_id": None})
+    assert cleared.status_code == 200, cleared.text
+    rows = client.get("/recurring", headers=headers).json()
+    assert rows[0]["next_on"] == "2027-05-04"
+    assert rows[0]["active"] is True
+
+
 def test_linking_the_apple_text_counts_as_the_icloud_payment(client, monkeypatch):
     monkeypatch.setattr("app.routes._lkr_rate", lambda currency: Decimal("330"))
     token = auth(client)
@@ -1228,6 +1755,22 @@ def test_linking_the_apple_text_counts_as_the_icloud_payment(client, monkeypatch
     assert linked.json()["recurring_id"] == plan["id"]
     rows = client.get("/recurring", headers=headers).json()
     assert rows[0]["next_on"] == "2026-11-04"
+    cleared = client.post(
+        f"/transactions/{posted['id']}/recurring",
+        headers=headers,
+        json={"recurring_id": None},
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["recurring_id"] == ""
+    saved = client.patch(
+        f"/transactions/{posted['id']}",
+        headers=headers,
+        json={"merchant": "APPLE.COM/BILL"},
+    )
+    assert saved.status_code == 200, saved.text
+    rows = client.get("/recurring", headers=headers).json()
+    assert rows[0]["next_on"] == "2026-10-04"
+    assert rows[0]["active"] is True
     balances = {row["name"]: row["balance"] for row in client.get("/accounts", headers=headers).json()}
     assert balances["Flash"] == 4013.3
     assert len(client.get("/transactions", headers=headers).json()) == 1

@@ -7,8 +7,8 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.models import Account, Budget, Category, Payee, Transaction, User, utcnow
-from app.sms_parser import looks_like_withdrawal, parse_sms
+from app.models import Account, Budget, Category, Payee, Transaction, User, UtilityBill, utcnow
+from app.sms_parser import UtilityNotice, looks_like_withdrawal, parse_sms, parse_utility
 
 INCOME_CATEGORIES = [
     ("Salary", "salary", "#3DDC84"),
@@ -75,7 +75,18 @@ HOUSEHOLD_CATEGORIES = [
             ("Kids stuff", "shopping", "#F472B6"),
         ],
     ),
-    ("Dress", "shopping", "#E7B8A3", []),
+    (
+        "Shopping",
+        "shopping",
+        "#E7B8A3",
+        [
+            ("Dress", "shopping", "#E7B8A3"),
+            ("Electronics", "electronics", "#7EB6FF"),
+            ("Shoes", "shopping", "#C5D7F6"),
+            ("Accessories", "shopping", "#F472B6"),
+            ("Home", "shopping", "#E7C27A"),
+        ],
+    ),
     ("Subscriptions", "subscriptions", "#C5D7F6", []),
     (
         "Day out",
@@ -228,7 +239,6 @@ def money(value) -> float:
 
 # Personal expense names from the old defaults. They are removed so the household list is the only one.
 _RETIRED_HOUSEHOLD = {
-    "Shopping",
     "Health care",
     "Debt payments",
     "Entertainment",
@@ -355,6 +365,11 @@ def ensure_household_categories(db: Session, user_id: str) -> None:
         remember_skipped_category(user, "expense", "__education_restored__")
         skipped.discard("expense|Education")
         skipped.add("expense|__education_restored__")
+    if user is not None and "expense|__shopping_restored__" not in skipped:
+        forget_skipped_category(user, "expense", "Shopping")
+        remember_skipped_category(user, "expense", "__shopping_restored__")
+        skipped.discard("expense|Shopping")
+        skipped.add("expense|__shopping_restored__")
     _membership_over_gym(by_name)
     has_children = {row.parent_id for row in rows if row.parent_id}
     order = max((row.sort_order or 0 for row in rows), default=-1) + 1
@@ -428,7 +443,8 @@ def _drop_retired_household(db: Session, user: User | None, user_id: str) -> Non
         for row in rows:
             if row.id in extra_ids or row.name in allowed:
                 continue
-            unwanted = prune_all or row.name in _RETIRED_HOUSEHOLD
+            # Only the old default names are removed. A category the user added stays.
+            unwanted = row.name in _RETIRED_HOUSEHOLD
             if unwanted or row.parent_id in extra_ids:
                 extra_ids.add(row.id)
                 changed = True
@@ -746,7 +762,7 @@ def txn_json(txn: Transaction, accounts: dict[str, Account], categories: dict[st
     }
 
 
-def loan_json(loan, accounts: dict[str, Account], repaid: Decimal) -> dict:
+def loan_json(loan, accounts: dict[str, Account], repaid: Decimal, payments: list | None = None) -> dict:
     principal = Decimal(str(loan.amount))
     remaining = principal - repaid
     account = accounts.get(loan.account_id or "")
@@ -768,6 +784,16 @@ def loan_json(loan, accounts: dict[str, Account], repaid: Decimal) -> dict:
         "note": loan.note or "",
         "opened_at": iso(loan.opened_at),
         "settled": remaining <= 0,
+        "payments": [
+            {
+                "id": payment.id,
+                "amount": money(payment.amount),
+                "account_id": payment.account_id,
+                "account_name": accounts[payment.account_id].name if payment.account_id in accounts else "",
+                "occurred_at": iso(payment.occurred_at),
+            }
+            for payment in (payments or [])
+        ],
     }
 
 
@@ -928,6 +954,59 @@ def _counts_for_header(txn: Transaction, account_id: str | None) -> str | None:
     return None
 
 
+def _tracked_accounts(accounts: dict[str, Account], account_id: str | None, scope: str | None) -> list[Account]:
+    rows = list(accounts.values())
+    if account_id:
+        return [row for row in rows if row.id == account_id]
+    if scope == "business":
+        rows = [row for row in rows if (row.purpose or "personal") == "business"]
+    elif scope == "personal":
+        rows = [row for row in rows if (row.purpose or "personal") != "business"]
+    return [row for row in rows if row.include_in_net]
+
+
+def _balances_left(
+    db: Session,
+    user: User,
+    included: list[Account],
+    days: list[str],
+    tz: ZoneInfo,
+) -> dict[str, Decimal]:
+    """Balance of the tracked accounts at the end of each day."""
+    if not days:
+        return {}
+    if not included:
+        return {day: Decimal("0") for day in days}
+    ids = {row.id for row in included}
+    current = sum((account_balance(db, row) for row in included), Decimal("0"))
+    txns = db.query(Transaction).filter_by(user_id=user.id, status="posted").all()
+    later = {day: Decimal("0") for day in days}
+    for txn in txns:
+        delta = sum((effect(txn, account_id) for account_id in ids), Decimal("0"))
+        if not delta:
+            continue
+        local = txn.occurred_at.replace(tzinfo=timezone.utc).astimezone(tz).date().isoformat()
+        for day in days:
+            if local > day:
+                later[day] += delta
+    return {day: current - later[day] for day in days}
+
+
+def _balance_after_each(db: Session, user: User, included: list[Account]) -> dict[str, Decimal]:
+    """Balance of the tracked accounts immediately after each posted transaction."""
+    if not included:
+        return {}
+    ids = {row.id for row in included}
+    running = sum((account_balance(db, row) for row in included), Decimal("0"))
+    txns = db.query(Transaction).filter_by(user_id=user.id, status="posted").all()
+    ordered = sorted(txns, key=lambda txn: (txn.occurred_at, txn.id), reverse=True)
+    after: dict[str, Decimal] = {}
+    for txn in ordered:
+        after[txn.id] = running
+        running -= sum((effect(txn, account_id) for account_id in ids), Decimal("0"))
+    return after
+
+
 def timeline(
     db: Session,
     user: User,
@@ -977,15 +1056,23 @@ def timeline(
         elif fee and account_id is None:
             signed = -fee
         group["total"] += signed
-        group["items"].append(txn_json(txn, accounts, categories))
+        group["items"].append(txn)
+    ordered = sorted(days.keys(), reverse=True)
+    tracked = _tracked_accounts(accounts, account_id, scope)
+    left = _balances_left(db, user, tracked, ordered, tz)
+    after = _balance_after_each(db, user, tracked)
     day_rows = []
-    for key in sorted(days.keys(), reverse=True):
+    for key in ordered:
         group = days[key]
         day_rows.append(
             {
                 "date": group["date"],
                 "total": money(group["total"]),
-                "items": group["items"],
+                "balance": money(left.get(key, Decimal("0"))),
+                "items": [
+                    {**txn_json(txn, accounts, categories), "balance": money(after.get(txn.id, Decimal("0")))}
+                    for txn in group["items"]
+                ],
             }
         )
     return {
@@ -1177,6 +1264,55 @@ def find_duplicate(db: Session, user_id: str, digest: str, fingerprint: str | No
     )
 
 
+def utility_bill_json(row: UtilityBill) -> dict:
+    due = row.due_on.date() if isinstance(row.due_on, datetime) else row.due_on
+    return {
+        "id": row.id,
+        "provider": row.provider,
+        "account_no": row.account_no or "",
+        "holder": row.holder or "",
+        "outstanding": money(row.outstanding),
+        "due_on": due.isoformat() if due else "",
+        "total_due": money(row.total_due) if row.total_due is not None else None,
+        "monthly": money(row.monthly) if row.monthly is not None else None,
+    }
+
+
+def record_utility_bill(db: Session, user: User, notice: UtilityNotice) -> UtilityBill:
+    account_no = notice.account_no or ""
+    row = (
+        db.query(UtilityBill)
+        .filter_by(user_id=user.id, provider=notice.provider, account_no=account_no)
+        .first()
+    )
+    outstanding = notice.outstanding if notice.outstanding is not None else notice.total_due or Decimal("0")
+    if row is None:
+        row = UtilityBill(
+            user_id=user.id,
+            provider=notice.provider,
+            account_no=account_no,
+            holder=notice.holder,
+            outstanding=outstanding,
+            due_on=notice.due_on,
+            total_due=notice.total_due,
+            monthly=notice.monthly,
+        )
+        db.add(row)
+    else:
+        existing_due = row.due_on.date() if isinstance(row.due_on, datetime) else row.due_on
+        if existing_due and notice.due_on and notice.due_on < existing_due:
+            return row
+        row.holder = notice.holder or row.holder
+        row.outstanding = outstanding
+        row.due_on = notice.due_on or row.due_on
+        row.total_due = notice.total_due if notice.total_due is not None else row.total_due
+        row.monthly = notice.monthly if notice.monthly is not None else row.monthly
+        row.updated_at = utcnow()
+    db.commit()
+    db.refresh(row)
+    return row
+
+
 def ingest_sms(
     db: Session,
     user: User,
@@ -1185,6 +1321,12 @@ def ingest_sms(
     received_at: datetime | None = None,
     manual: bool = False,
 ) -> dict:
+    notice = parse_utility(body)
+    if notice is not None:
+        if notice.kind != "bill":
+            return {"status": "ignored", "reason": notice.kind, "parsed": {"recognized": False}, "transaction": None}
+        saved = record_utility_bill(db, user, notice)
+        return {"status": "bill", "bill": utility_bill_json(saved), "parsed": {"recognized": False}, "transaction": None}
     parsed = parse_sms(body, received_at)
     accounts = account_map(db, user.id)
     categories = category_map(db, user.id)

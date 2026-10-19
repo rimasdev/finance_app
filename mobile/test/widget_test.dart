@@ -10,7 +10,10 @@ import 'package:folio/screens/explore_screen.dart';
 import 'package:folio/screens/insights_screen.dart';
 import 'package:folio/screens/loans_screen.dart';
 import 'package:folio/screens/recurring_screen.dart';
+import 'package:folio/screens/shell.dart';
+import 'package:folio/screens/timeline_screen.dart';
 import 'package:folio/store.dart';
+import 'package:folio/widgets.dart';
 import 'package:folio/subscriptions.dart';
 import 'package:folio/theme.dart';
 import 'package:provider/provider.dart';
@@ -388,6 +391,8 @@ void main() {
     expect(find.text('Business'), findsOneWidget);
     expect(find.text('From account'), findsOneWidget);
     expect(find.text('To account'), findsOneWidget);
+    expect(find.byIcon(Icons.savings_rounded), findsNothing);
+    expect(find.byIcon(Icons.account_balance_rounded), findsOneWidget);
     expect(find.text('Description, optional'), findsOneWidget);
     await tester.drag(find.byType(ListView).first, const Offset(0, -500));
     await tester.pump();
@@ -474,6 +479,234 @@ void main() {
     expect(find.text('Currency'), findsOneWidget);
     expect(find.text('Payee'), findsOneWidget);
     expect(find.text('Choose who you pay'), findsOneWidget);
+  });
+
+  testWidgets('a discounted installment payment can be entered', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final store = FolioStore()
+      ..recurring = [
+        RecurringModel(
+          id: 'plan',
+          kind: 'installment',
+          name: 'Carnage',
+          provider: 'Mint Pay',
+          currency: 'LKR',
+          amount: 2746.33,
+          accountId: 'flash',
+          accountName: 'Flash Primary',
+          interval: 'monthly',
+          nextOn: '2026-10-13',
+          installmentsTotal: 3,
+          installmentsDone: 0,
+          active: true,
+          note: '',
+        ),
+      ];
+    await tester.pumpWidget(
+      ChangeNotifierProvider(
+        create: (_) => store,
+        child: MaterialApp(theme: buildFolioTheme(), home: const RecurringScreen()),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Installment'));
+    await tester.pump();
+    await tester.tap(find.text('Record payment'));
+    await tester.pumpAndSettle();
+    expect(find.text('Scheduled Rs. 2,746.33'), findsOneWidget);
+    await tester.enterText(find.byType(TextField), '2546.33');
+    await tester.pump();
+    expect(find.text('Discount Rs. 200.00'), findsOneWidget);
+    expect(find.text('The next payment stays Rs. 2,746.33.'), findsOneWidget);
+  });
+
+  testWidgets('linking a lower card charge asks whether it is a discount', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(390, 1400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final store = FolioStore()
+      ..accounts = [
+        AccountModel(
+          id: 'flash',
+          name: 'Flash Primary',
+          type: 'bank',
+          purpose: 'personal',
+          bankName: 'Commercial Bank',
+          last4: '8741',
+          smsSender: '',
+          openingBalance: 0,
+          balance: 289.73,
+          automationsEnabled: true,
+        ),
+      ]
+      ..recurring = [
+        RecurringModel(
+          id: 'plan',
+          kind: 'installment',
+          name: 'Carnage',
+          provider: 'Mint Pay',
+          currency: 'LKR',
+          amount: 2746.33,
+          accountId: 'flash',
+          accountName: 'Flash Primary',
+          interval: 'monthly',
+          nextOn: '2026-10-11',
+          installmentsTotal: 1,
+          installmentsDone: 0,
+          active: true,
+          note: '',
+        ),
+      ];
+    await tester.pumpWidget(
+      ChangeNotifierProvider(
+        create: (_) => store,
+        child: MaterialApp(
+          theme: buildFolioTheme(),
+          home: TransactionFormScreen(
+            existing: TxnModel(
+              id: 'mint',
+              accountId: 'flash',
+              accountName: 'Flash Primary',
+              transferAccountId: null,
+              transferAccountName: '',
+              categoryId: 'shop',
+              categoryName: 'Shopping',
+              categoryIcon: 'other',
+              categoryColor: '#9CA3AF',
+              direction: 'expense',
+              amount: 2743.68,
+              merchant: 'MINTPAY Colombo 06',
+              note: '',
+              occurredAt: DateTime(2026, 10, 11, 10, 6),
+              scope: 'personal',
+              source: 'sms',
+              status: 'posted',
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    final link = find.text('Not linked').first;
+    await tester.ensureVisible(link);
+    await tester.tap(link);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Carnage'));
+    await tester.pumpAndSettle();
+    expect(find.text('Is this a discount?'), findsOneWidget);
+    expect(find.textContaining('Rs. 2.65'), findsOneWidget);
+    await tester.tap(find.text('No'));
+    await tester.pumpAndSettle();
+    expect(find.text('A different amount can only be linked when it is a discount.'), findsOneWidget);
+    expect(find.text('Not linked'), findsWidgets);
+  });
+
+  testWidgets('the notification icon opens bills and upcoming payments', (tester) async {
+    final due = DateTime.now().add(const Duration(days: 1));
+    final nextOn =
+        '${due.year.toString().padLeft(4, '0')}-${due.month.toString().padLeft(2, '0')}-${due.day.toString().padLeft(2, '0')}';
+    final store = FolioStore()
+      ..bills = [
+        UtilityBillModel(
+          id: 'water',
+          provider: 'Water',
+          accountNo: '42/12/138/027/11',
+          holder: 'MR. M.J.M. FLYIL',
+          outstanding: 9101.25,
+          dueOn: '2026-10-15',
+        ),
+      ]
+      ..recurring = [
+        RecurringModel(
+          id: 'netflix',
+          kind: 'subscription',
+          name: 'Netflix',
+          provider: 'Netflix',
+          currency: 'LKR',
+          amount: 1490,
+          accountId: 'flash',
+          accountName: 'Flash Primary',
+          interval: 'monthly',
+          nextOn: nextOn,
+          installmentsTotal: null,
+          installmentsDone: 0,
+          active: true,
+          note: '',
+        ),
+      ];
+    await tester.pumpWidget(
+      ChangeNotifierProvider(
+        create: (_) => store,
+        child: MaterialApp(theme: buildFolioTheme(), home: const DashboardScreen()),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.byTooltip('Notifications'));
+    await tester.pumpAndSettle();
+    expect(find.text('Notifications'), findsOneWidget);
+    expect(find.text('Water'), findsOneWidget);
+    expect(find.text('Netflix  →  Rs. 1,490.00'), findsOneWidget);
+    expect(find.text('Subscription · Flash Primary · Netflix'), findsOneWidget);
+  });
+
+  testWidgets('a finished installment payment opens for editing', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final store = FolioStore()
+      ..recurring = [
+        RecurringModel(
+          id: 'plan',
+          kind: 'installment',
+          name: 'Carnage',
+          provider: 'Mint Pay',
+          currency: 'LKR',
+          amount: 2746.33,
+          accountId: 'flash',
+          accountName: 'Flash Primary',
+          interval: 'monthly',
+          nextOn: '2026-10-04',
+          installmentsTotal: 1,
+          installmentsDone: 1,
+          active: false,
+          note: '',
+          payments: [
+            TxnModel(
+              id: 'pay',
+              accountId: 'flash',
+              accountName: 'Flash Primary',
+              transferAccountId: null,
+              transferAccountName: '',
+              categoryId: null,
+              categoryName: '',
+              categoryIcon: 'other',
+              categoryColor: '#9CA3AF',
+              direction: 'expense',
+              amount: 2746.33,
+              merchant: 'Carnage',
+              note: '',
+              occurredAt: DateTime(2026, 10, 4),
+              scope: 'personal',
+              source: 'recurring',
+              status: 'posted',
+            ),
+          ],
+        ),
+      ];
+    await tester.pumpWidget(
+      ChangeNotifierProvider(
+        create: (_) => store,
+        child: MaterialApp(theme: buildFolioTheme(), home: const RecurringScreen()),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Installment'));
+    await tester.pump();
+    expect(find.text('Sunday, 4 October · 12:00 AM'), findsOneWidget);
+    expect(find.text('Flash Primary · Recorded'), findsOneWidget);
+    await tester.tap(find.text('Sunday, 4 October · 12:00 AM'));
+    await tester.pumpAndSettle();
+    expect(find.text('Edit transaction'), findsOneWidget);
+    expect(find.byIcon(Icons.delete_outline), findsOneWidget);
   });
 
   testWidgets('a withdrawal can be changed into a transfer to cash', (
@@ -615,6 +848,71 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Misnaf'), findsOneWidget);
     expect(find.text('Delete this loan?'), findsNothing);
+  });
+
+  testWidgets('a recorded loan payment opens for editing with an account', (tester) async {
+    AccountModel account(String id, String name, double balance) => AccountModel(
+      id: id,
+      name: name,
+      type: 'bank',
+      purpose: 'personal',
+      bankName: '',
+      last4: '',
+      smsSender: '',
+      openingBalance: balance,
+      balance: balance,
+      automationsEnabled: true,
+    );
+    final store = FolioStore()
+      ..accounts = [account('flash', 'Flash', 5000), account('cash', 'Cash', 1000)]
+      ..loans = [
+        LoanModel(
+          id: 'loan',
+          kind: 'lend',
+          partyKind: 'person',
+          partyName: 'Brother',
+          counterpartyAccountId: null,
+          counterpartyAccountName: '',
+          accountId: 'flash',
+          accountName: 'Flash',
+          amount: 3900,
+          repaid: 900,
+          remaining: 3000,
+          dueOn: '',
+          note: '',
+          settled: false,
+          payments: [
+            LoanPaymentModel(
+              id: 'pay',
+              amount: 900,
+              accountId: 'flash',
+              accountName: 'Flash',
+              occurredAt: '2026-10-01T00:00:00Z',
+            ),
+          ],
+        ),
+      ];
+    await tester.pumpWidget(
+      ChangeNotifierProvider(
+        create: (_) => store,
+        child: MaterialApp(theme: buildFolioTheme(), home: const LoansScreen()),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Lent'));
+    await tester.pump();
+    await tester.tap(find.text('Rs. 900.00'));
+    await tester.pumpAndSettle();
+    expect(find.text('Edit payment'), findsOneWidget);
+    expect(find.text('Into account'), findsOneWidget);
+    expect(find.text('Save changes'), findsOneWidget);
+    expect(find.text('Delete payment'), findsOneWidget);
+    await tester.tapAt(const Offset(8, 8));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Record payment'));
+    await tester.pumpAndSettle();
+    expect(find.text('Into account'), findsOneWidget);
+    expect(find.text('Save payment'), findsOneWidget);
   });
 
   testWidgets('a category opens the expenses inside it', (tester) async {
@@ -773,5 +1071,63 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Salary'), findsOneWidget);
     expect(find.text('Groceries'), findsNothing);
+  });
+
+  testWidgets('all accounts can be chosen after one account', (tester) async {
+    final store = FolioStore()
+      ..accounts = [
+        AccountModel(
+          id: 'cash',
+          name: 'Cash',
+          type: 'cash',
+          purpose: 'personal',
+          bankName: '',
+          last4: '',
+          smsSender: '',
+          openingBalance: 1000,
+          balance: 1000,
+          automationsEnabled: true,
+        ),
+      ]
+      ..accountFilter = 'cash';
+    await tester.pumpWidget(
+      ChangeNotifierProvider(
+        create: (_) => store,
+        child: MaterialApp(theme: buildFolioTheme(), home: const TimelineScreen()),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Cash'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('All accounts').last);
+    await tester.pump();
+    expect(store.accountFilter, isNull);
+    expect(find.text('All accounts'), findsWidgets);
+  });
+
+  testWidgets('a timeline row shows the balance left after it', (tester) async {
+    final txn = TxnModel(
+      id: 'tea',
+      accountId: 'cash',
+      accountName: 'Cash',
+      transferAccountId: null,
+      transferAccountName: '',
+      categoryId: null,
+      categoryName: '',
+      categoryIcon: 'other',
+      categoryColor: '#9CA3AF',
+      direction: 'expense',
+      amount: 100,
+      merchant: 'Tea',
+      note: '',
+      occurredAt: DateTime(2026, 10, 10, 9, 30),
+      scope: 'personal',
+      source: 'manual',
+      status: 'posted',
+      balance: 900,
+    );
+    await tester.pumpWidget(MaterialApp(theme: buildFolioTheme(), home: Scaffold(body: TxnTile(txn: txn))));
+    await tester.pump();
+    expect(find.text('Rs. 900.00'), findsOneWidget);
   });
 }
